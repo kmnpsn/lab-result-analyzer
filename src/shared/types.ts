@@ -4,6 +4,61 @@ export type LabFlag = 'L' | 'N' | 'H';
 export type RecordType = 'daily' | 'lab';
 export type PlanTier = 'free' | 'plus' | 'pro';
 export type RegistrationMode = 'demo' | 'invite_only' | 'open';
+export type ServiceRole = 'admin' | 'user';
+export type AuthProviderId = 'google' | 'apple' | 'line' | 'yahoo_japan' | 'facebook' | 'amazon';
+
+export interface AuthProviderMeta {
+  id: AuthProviderId;
+  label: string;
+  icon: string;
+  primary?: boolean;
+}
+
+export const AUTH_PROVIDERS: ReadonlyArray<AuthProviderMeta> = [
+  { id: 'google', label: 'Google', icon: 'G', primary: true },
+  { id: 'line', label: 'LINE', icon: 'L' },
+  { id: 'apple', label: 'Apple ID', icon: '' },
+  { id: 'yahoo_japan', label: 'Yahoo! JAPAN', icon: 'Y!' },
+  { id: 'facebook', label: 'Facebook', icon: 'f' },
+  { id: 'amazon', label: 'Amazon', icon: 'a' },
+];
+
+export interface LinkedIdentity {
+  id?: number;
+  provider: AuthProviderId;
+  provider_subject: string;
+  email_snapshot: string | null;
+  display_name_snapshot?: string | null;
+  linked_at: string;
+  last_used_at?: string;
+}
+
+export interface InvitationSummary {
+  token_preview: string;
+  email_display: string;
+  note: string;
+  status: 'pending' | 'used' | 'expired' | 'revoked';
+  created_at: string;
+  expires_at: string;
+  invite_url?: string; // 作成直後の1回のみ返却
+}
+
+export interface AccountSummary {
+  registration_mode: RegistrationMode;
+  auth_mode?: 'demo' | 'production';
+  authenticated: boolean;
+  user_id?: number;
+  service_role?: ServiceRole;
+  email: string | null;
+  display_name: string;
+  plan_tier: PlanTier;
+  monthly_ocr_used: number;
+  monthly_ocr_limit: number;
+  terms_accepted: boolean;
+  csrf_token?: string;
+  linked_identities?: LinkedIdentity[];
+  invitations?: InvitationSummary[];
+}
 
 export interface UserProfile {
   id: number;
@@ -17,17 +72,6 @@ export interface UserProfile {
   preferred_provider: AiProviderName;
   preferred_model: string;
   updated_at?: string;
-}
-
-export interface AccountSummary {
-  registration_mode: RegistrationMode;
-  authenticated: boolean;
-  email: string | null;
-  display_name: string;
-  plan_tier: PlanTier;
-  monthly_ocr_used: number;
-  monthly_ocr_limit: number;
-  terms_accepted: boolean;
 }
 
 /**

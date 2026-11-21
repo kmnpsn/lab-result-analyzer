@@ -2,9 +2,12 @@ import { Injectable } from '@angular/core';
 import {
   AccountSummary,
   AiProviderName,
+  AuthProviderId,
   BiologicalSex,
+  InvitationSummary,
   LabItem,
   LabRecord,
+  LinkedIdentity,
   REFERENCE_STANDARDS,
   ReferenceStandard,
   UserProfile,
@@ -18,6 +21,7 @@ import {
 } from '../shared/error-codes';
 import {
   PROVIDER_META,
+  createFallbackAccountSummary,
   createFallbackProfile,
   createFallbackRecords,
   createSampleOcrResult,
@@ -69,19 +73,35 @@ export interface AnalyzeResponse {
   model_used?: string;
 }
 
+export interface InviteVerifyResponse {
+  valid: boolean;
+  email_hint?: string;
+  reason?: 'expired' | 'used' | 'revoked' | 'not_found';
+}
+
+export interface CreateInvitationResponse {
+  invitation: InvitationSummary;
+  invite_url: string;
+}
+
 const STORAGE_STATE_KEY = 'lab_analyzer_offline_state_v2';
 const STORAGE_AI_KEY = 'lab_analyzer_ai_config_v1';
+const STORAGE_ACCOUNT_KEY = 'lab_analyzer_offline_account_v1';
 
 export function createDefaultAccountSummary(): AccountSummary {
   return {
     registration_mode: 'demo',
+    auth_mode: 'demo',
     authenticated: false,
+    service_role: 'user',
     email: null,
     display_name: 'ゲスト',
     plan_tier: 'free',
     monthly_ocr_used: 0,
-    monthly_ocr_limit: 5,
+    monthly_ocr_limit: 10,
     terms_accepted: true,
+    linked_identities: [],
+    invitations: [],
   };
 }
 
@@ -91,6 +111,7 @@ export class ApiService {
   servicePaused = false;
   servicePausedCode: AppErrorCode | null = null;
   servicePausedReason = '';
+  private csrfToken: string | null = null;
 
   clearServicePause(): void {
     this.servicePaused = false;
@@ -165,13 +186,58 @@ export class ApiService {
     }
   }
 
+  private loadLocalAccount(displayName?: string): AccountSummary {
+    try {
+      const raw = localStorage.getItem(STORAGE_ACCOUNT_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as AccountSummary;
+        if (parsed && typeof parsed === 'object') {
+          return {
+            ...createFallbackAccountSummary(displayName),
+            ...parsed,
+            linked_identities: Array.isArray(parsed.linked_identities)
+              ? parsed.linked_identities
+              : createFallbackAccountSummary(displayName).linked_identities,
+            invitations: Array.isArray(parsed.invitations) ? parsed.invitations : [],
+          };
+        }
+      }
+    } catch {
+      // fallback to default
+    }
+    const fallback = createFallbackAccountSummary(displayName);
+    this.saveLocalAccount(fallback);
+    return fallback;
+  }
+
+  private saveLocalAccount(account: AccountSummary): void {
+    try {
+      localStorage.setItem(STORAGE_ACCOUNT_KEY, JSON.stringify(account));
+    } catch {
+      // ignore
+    }
+  }
+
+  private syncCsrfFromAccount(account?: AccountSummary): void {
+    if (account?.csrf_token) {
+      this.csrfToken = account.csrf_token;
+    }
+  }
+
   private async fetchJson<T>(url: string, init?: RequestInit, context: ErrorContext = 'read'): Promise<T> {
     let res: Response;
+    const method = (init?.method ?? 'GET').toUpperCase();
+    const extraHeaders: Record<string, string> = {};
+    if (this.csrfToken && method !== 'GET' && method !== 'HEAD') {
+      extraHeaders['X-Karada-CSRF'] = this.csrfToken;
+    }
     try {
       res = await fetch(url, {
+        credentials: 'same-origin',
         ...init,
         headers: {
           'Content-Type': 'application/json',
+          ...extraHeaders,
           ...(init?.headers ?? {}),
         },
       });
@@ -186,10 +252,14 @@ export class ApiService {
     if (!res.ok) {
       let code: AppErrorCode = res.status === 503 ? 'SERVICE_PAUSED' : 'UNKNOWN';
       let requestId: string | undefined;
+      let serverRawCode: string | undefined;
 
       if (isJson) {
         try {
           const body = (await res.json()) as { error?: { code?: unknown; requestId?: unknown } };
+          if (typeof body?.error?.code === 'string') {
+            serverRawCode = body.error.code;
+          }
           if (isServerErrorCode(body?.error?.code)) {
             code = body.error.code;
           }
@@ -204,7 +274,13 @@ export class ApiService {
         throw new ApiError('NETWORK', 404, friendlyErrorMessage('NETWORK', context));
       }
 
-      const friendly = friendlyErrorMessage(code, context);
+      let friendly = friendlyErrorMessage(code, context);
+      if (res.status === 409 && serverRawCode === 'STATE_CONFLICT') {
+        friendly = 'このアカウントはすでに別の利用者に連携されているか、唯一のログイン手段のため変更できません。';
+      } else if (res.status === 403 && code === 'AUTH_NOT_ADMIN') {
+        friendly = 'この操作は管理者（Owner）のみ利用できます。';
+      }
+
       if (res.status === 503 || code === 'SERVICE_PAUSED' || code === 'CIRCUIT_OPEN') {
         this.servicePaused = true;
         this.servicePausedCode = code;
@@ -233,12 +309,14 @@ export class ApiService {
     try {
       const data = await this.fetchJson<BootstrapResponse>('/api/bootstrap', undefined, 'read');
       this.isOffline = false;
+      const account = data.account ?? createDefaultAccountSummary();
+      this.syncCsrfFromAccount(account);
       return {
         profile: data.profile,
         records: data.records ?? [],
         standards: data.standards?.length ? data.standards : REFERENCE_STANDARDS,
         providers: data.providers?.length ? data.providers : ['gemini', 'openai', 'claude'],
-        account: data.account ?? createDefaultAccountSummary(),
+        account,
       };
     } catch (err) {
       if (!this.shouldFallbackOffline(err)) {
@@ -246,15 +324,13 @@ export class ApiService {
       }
       this.isOffline = true;
       const local = this.loadLocalState();
+      const localAccount = this.loadLocalAccount(local.profile.name || 'ゲスト');
       return {
         profile: local.profile,
         records: local.records,
         standards: REFERENCE_STANDARDS,
         providers: ['gemini', 'openai', 'claude'],
-        account: {
-          ...createDefaultAccountSummary(),
-          display_name: local.profile.name || 'ゲスト',
-        },
+        account: localAccount,
       };
     }
   }
@@ -472,6 +548,258 @@ export class ApiService {
         params.provider,
         params.model
       );
+    }
+  }
+
+  // ===== 認証・招待・SNS後追い連携・アカウント管理 =====
+
+  getGoogleLoginUrl(inviteToken?: string): string {
+    if (inviteToken && inviteToken.trim()) {
+      return `/api/auth/google/start?invite=${encodeURIComponent(inviteToken.trim())}`;
+    }
+    return '/api/auth/google/start';
+  }
+
+  async getSession(): Promise<AccountSummary> {
+    try {
+      const account = await this.fetchJson<AccountSummary>('/api/auth/session', undefined, 'read');
+      this.isOffline = false;
+      this.syncCsrfFromAccount(account);
+      return account;
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
+      this.isOffline = true;
+      const local = this.loadLocalState();
+      return this.loadLocalAccount(local.profile.name);
+    }
+  }
+
+  async verifyInvite(token: string): Promise<InviteVerifyResponse> {
+    try {
+      const res = await this.fetchJson<InviteVerifyResponse>(
+        `/api/invite/${encodeURIComponent(token)}/verify`,
+        undefined,
+        'read'
+      );
+      this.isOffline = false;
+      return res;
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
+      this.isOffline = true;
+      const localAcc = this.loadLocalAccount();
+      const matched = (localAcc.invitations ?? []).find(
+        (inv) => inv.invite_url?.endsWith(`/${token}`) || inv.token_preview === token.slice(0, 8)
+      );
+      if (matched) {
+        if (matched.status === 'pending') {
+          return { valid: true, email_hint: matched.email_display };
+        }
+        return { valid: false, reason: matched.status };
+      }
+      if (token.startsWith('demo')) {
+        return { valid: true, email_hint: 'family@example.com' };
+      }
+      return { valid: false, reason: 'not_found' };
+    }
+  }
+
+  async linkIdentity(params: {
+    provider: AuthProviderId;
+    provider_subject?: string;
+    email?: string;
+    display_name?: string;
+  }): Promise<LinkedIdentity[]> {
+    try {
+      const res = await this.fetchJson<{ linked_identities?: LinkedIdentity[] } | LinkedIdentity[]>(
+        '/api/auth/identities/link',
+        {
+          method: 'POST',
+          body: JSON.stringify(params),
+        },
+        'write'
+      );
+      this.isOffline = false;
+      return Array.isArray(res) ? res : (res.linked_identities ?? []);
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
+      this.isOffline = true;
+      const localAcc = this.loadLocalAccount();
+      const current = localAcc.linked_identities ?? [];
+      if (!current.some((id) => id.provider === params.provider)) {
+        const now = new Date().toISOString();
+        const next: LinkedIdentity[] = [
+          ...current,
+          {
+            id: current.reduce((m, x) => Math.max(m, x.id ?? 0), 0) + 1,
+            provider: params.provider,
+            provider_subject: params.provider_subject || `demo-${params.provider}-${Date.now().toString(36)}`,
+            email_snapshot: params.email || localAcc.email || `${params.provider}@example.com`,
+            display_name_snapshot: params.display_name || localAcc.display_name,
+            linked_at: now,
+            last_used_at: now,
+          },
+        ];
+        localAcc.linked_identities = next;
+        this.saveLocalAccount(localAcc);
+        return next;
+      }
+      return current;
+    }
+  }
+
+  async unlinkIdentity(provider: AuthProviderId): Promise<LinkedIdentity[]> {
+    try {
+      const res = await this.fetchJson<{ linked_identities?: LinkedIdentity[] } | LinkedIdentity[]>(
+        `/api/auth/identities/${encodeURIComponent(provider)}`,
+        {
+          method: 'DELETE',
+        },
+        'delete'
+      );
+      this.isOffline = false;
+      return Array.isArray(res) ? res : (res.linked_identities ?? []);
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
+      this.isOffline = true;
+      const localAcc = this.loadLocalAccount();
+      const current = localAcc.linked_identities ?? [];
+      if (current.length <= 1) {
+        throw new ApiError(
+          'UNKNOWN',
+          409,
+          '唯一のログイン手段のため解除できません。他のSNSを連携してから解除してください。'
+        );
+      }
+      const next = current.filter((id) => id.provider !== provider);
+      localAcc.linked_identities = next;
+      this.saveLocalAccount(localAcc);
+      return next;
+    }
+  }
+
+  async createInvitation(params: {
+    email: string;
+    note?: string;
+    expiresInDays?: number;
+  }): Promise<CreateInvitationResponse> {
+    try {
+      const res = await this.fetchJson<CreateInvitationResponse>(
+        '/api/auth/invitations',
+        {
+          method: 'POST',
+          body: JSON.stringify(params),
+        },
+        'write'
+      );
+      this.isOffline = false;
+      return res;
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
+      this.isOffline = true;
+      const localAcc = this.loadLocalAccount();
+      const rawToken = `demo_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+      const origin = typeof window !== 'undefined' ? window.location.origin : 'https://karada-note.example';
+      const inviteUrl = `${origin}/invite/${rawToken}`;
+      const now = new Date();
+      const expires = new Date(now.getTime() + (params.expiresInDays ?? 7) * 86400 * 1000);
+      const invitation: InvitationSummary = {
+        token_preview: rawToken.slice(0, 8),
+        email_display: params.email.trim(),
+        note: (params.note ?? '').trim(),
+        status: 'pending',
+        created_at: now.toISOString(),
+        expires_at: expires.toISOString(),
+        invite_url: inviteUrl,
+      };
+      localAcc.invitations = [invitation, ...(localAcc.invitations ?? [])];
+      this.saveLocalAccount(localAcc);
+      return { invitation, invite_url: inviteUrl };
+    }
+  }
+
+  async revokeInvitation(tokenPreview: string): Promise<void> {
+    try {
+      await this.fetchJson<{ revoked?: boolean }>(
+        `/api/auth/invitations/${encodeURIComponent(tokenPreview)}`,
+        {
+          method: 'DELETE',
+        },
+        'delete'
+      );
+      this.isOffline = false;
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
+      this.isOffline = true;
+      const localAcc = this.loadLocalAccount();
+      localAcc.invitations = (localAcc.invitations ?? []).map((inv) =>
+        inv.token_preview === tokenPreview ? { ...inv, status: 'revoked' as const } : inv
+      );
+      this.saveLocalAccount(localAcc);
+    }
+  }
+
+  async logout(allDevices = false): Promise<{ logged_out: boolean }> {
+    const endpoint = allDevices ? '/api/auth/logout-all' : '/api/auth/logout';
+    try {
+      const res = await this.fetchJson<{ logged_out: boolean }>(
+        endpoint,
+        {
+          method: 'POST',
+          body: JSON.stringify({}),
+        },
+        'write'
+      );
+      this.isOffline = false;
+      this.csrfToken = null;
+      return res;
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
+      this.isOffline = true;
+      const localAcc = this.loadLocalAccount();
+      localAcc.authenticated = false;
+      this.saveLocalAccount(localAcc);
+      return { logged_out: true };
+    }
+  }
+
+  async deleteAccount(): Promise<{ deleted: boolean; reset_demo?: boolean }> {
+    try {
+      const res = await this.fetchJson<{ deleted: boolean; reset_demo?: boolean }>(
+        '/api/auth/account',
+        {
+          method: 'DELETE',
+        },
+        'delete'
+      );
+      this.isOffline = false;
+      this.csrfToken = null;
+      return res;
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
+      this.isOffline = true;
+      try {
+        localStorage.removeItem(STORAGE_STATE_KEY);
+        localStorage.removeItem(STORAGE_ACCOUNT_KEY);
+      } catch {
+        // ignore
+      }
+      return { deleted: true, reset_demo: true };
     }
   }
 }

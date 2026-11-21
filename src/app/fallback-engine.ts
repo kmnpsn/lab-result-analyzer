@@ -1,4 +1,5 @@
 import {
+  AccountSummary,
   AiProviderName,
   BiologicalSex,
   LabItem,
@@ -115,6 +116,35 @@ export function createFallbackProfile(): UserProfile {
     preferred_provider: 'gemini',
     preferred_model: 'gemini-2.5-flash',
     updated_at: '2026-11-10T09:00:00Z',
+  };
+}
+
+export function createFallbackAccountSummary(displayName = '佐藤 陽子'): AccountSummary {
+  const now = new Date().toISOString();
+  return {
+    registration_mode: 'demo',
+    auth_mode: 'demo',
+    authenticated: true,
+    user_id: 1,
+    service_role: 'admin',
+    email: 'owner@example.com',
+    display_name: displayName || '佐藤 陽子',
+    plan_tier: 'free',
+    monthly_ocr_used: 0,
+    monthly_ocr_limit: 10,
+    terms_accepted: true,
+    linked_identities: [
+      {
+        id: 1,
+        provider: 'google',
+        provider_subject: 'demo-google-owner',
+        email_snapshot: 'owner@example.com',
+        display_name_snapshot: displayName || '佐藤 陽子',
+        linked_at: now,
+        last_used_at: now,
+      },
+    ],
+    invitations: [],
   };
 }
 

@@ -131,6 +131,70 @@
   }
 
   <main class="main-content">
+    <!-- ===== 招待 URL 到達時の案内バナー / カード ===== -->
+    @if (inviteChecking || inviteState !== 'none') {
+      <section
+        class="invite-banner"
+        [class.invite-invalid]="inviteState === 'invalid'"
+        role="region"
+        aria-label="招待のご案内"
+      >
+        @if (inviteChecking) {
+          <div class="invite-banner-body">
+            <div class="invite-banner-title">✉️ 招待リンクを確認しています...</div>
+          </div>
+        } @else if (inviteState === 'valid') {
+          <div class="invite-banner-body">
+            <div class="invite-banner-badge">✉️ ご招待</div>
+            <h2 class="invite-banner-title">からだ手帳への招待を受けています</h2>
+            <p class="invite-banner-desc">
+              Googleアカウントでログインして、あなた専用のからだ手帳をはじめましょう。
+              @if (inviteEmailHint) {
+                <span class="invite-email-hint">（対象メールアドレス: {{ inviteEmailHint }}）</span>
+              }
+            </p>
+            <div class="invite-banner-actions">
+              <button
+                type="button"
+                class="btn-primary invite-start-btn"
+                (click)="startGoogleLogin(inviteToken ?? undefined)"
+              >
+                Googleで登録してはじめる
+              </button>
+              <button type="button" class="btn-ghost small-btn" (click)="dismissInviteBanner()">
+                閉じる
+              </button>
+            </div>
+          </div>
+        } @else if (inviteState === 'invalid') {
+          <div class="invite-banner-body">
+            <div class="invite-banner-badge invalid">⚠️ 招待リンクエラー</div>
+            <p class="invite-banner-desc">
+              この招待リンクは使えません。招待してくれた方にお知らせください。
+            </p>
+            <div class="invite-banner-actions">
+              <button type="button" class="btn-ghost small-btn" (click)="dismissInviteBanner()">
+                閉じる
+              </button>
+            </div>
+          </div>
+        }
+      </section>
+    }
+
+    @if (authErrorBanner) {
+      <section class="invite-banner invite-invalid" role="alert">
+        <div class="invite-banner-body">
+          <p class="invite-banner-desc">{{ authErrorBanner }}</p>
+          <div class="invite-banner-actions">
+            <button type="button" class="btn-ghost small-btn" (click)="dismissAuthErrorBanner()">
+              閉じる
+            </button>
+          </div>
+        </div>
+      </section>
+    }
+
     @if (loading) {
       <div class="loading-card">データを読み込み中...</div>
     } @else {
@@ -1238,46 +1302,256 @@
             </div>
           </section>
 
-          <!-- 一般公開・課金・データ保護の枠 -->
+          <!-- アカウント・ログイン連携・家族招待・データ保護 -->
           <section class="panel account-plan-panel">
             <div class="panel-header">
               <div>
-                <h2>👤 アカウント・ご利用プラン（公開準備枠）</h2>
-                <p class="panel-desc">現在の利用モード、データ書き出し、プライバシー保護方針を確認できます。</p>
+                <h2>👤 アカウント・ログイン連携・家族招待</h2>
+                <p class="panel-desc">
+                  ログイン状態の確認、各種SNSの後追い連携、家族・知人の招待、データ管理ができます。
+                </p>
               </div>
             </div>
 
-            <div class="account-status-grid">
-              <div class="account-stat-box">
-                <span class="account-stat-label">現在の利用モード</span>
-                <strong class="account-stat-val">{{ getRegistrationModeLabel() }}</strong>
-              </div>
-              <div class="account-stat-box">
-                <span class="account-stat-label">ご利用プラン</span>
-                <div class="plan-badge-row">
-                  <span class="plan-tier-badge">{{ getPlanTierLabel() }}</span>
+            <!-- ① ログイン状態 & Google ログイン / ログアウト -->
+            <div class="auth-section-block">
+              <h3 class="auth-sub-heading">① ログイン状態</h3>
+              <div class="account-status-grid">
+                <div class="account-stat-box">
+                  <span class="account-stat-label">ログイン中のアカウント</span>
+                  <div class="account-user-row">
+                    <strong class="account-stat-val">
+                      {{ account.display_name || profile.name || 'ゲスト' }}
+                    </strong>
+                    @if (isOwnerAdmin) {
+                      <span class="owner-role-badge">👑 管理者</span>
+                    }
+                  </div>
+                  <span class="account-email-text">
+                    {{ account.email || 'メールアドレス未連携' }}
+                  </span>
+                </div>
+
+                <div class="account-stat-box">
+                  <span class="account-stat-label">動作モード・ご利用プラン</span>
+                  <div class="plan-badge-row">
+                    <span class="plan-tier-badge">{{ getRegistrationModeLabel() }}</span>
+                    <span class="mode-sub-badge">{{ getAuthModeLabel() }}</span>
+                  </div>
                   <span class="plan-quota-text">
-                    今月の紙読み取り: {{ account.monthly_ocr_used }} / {{ account.monthly_ocr_limit }} 回
+                    {{ getPlanTierLabel() }} ・ 今月の紙読み取り: {{ account.monthly_ocr_used }} / {{ account.monthly_ocr_limit }} 回
                   </span>
                 </div>
               </div>
+
+              <div class="auth-action-row">
+                <button
+                  type="button"
+                  class="btn-primary"
+                  [disabled]="authBusy"
+                  (click)="startGoogleLogin()"
+                >
+                  {{ account.authenticated ? '🔄 Google で再ログイン' : 'Google でログイン' }}
+                </button>
+                <button
+                  type="button"
+                  class="btn-secondary"
+                  [disabled]="authBusy"
+                  (click)="logout(false)"
+                >
+                  この端末からログアウト
+                </button>
+                <button
+                  type="button"
+                  class="btn-ghost"
+                  [disabled]="authBusy"
+                  (click)="logout(true)"
+                >
+                  すべての端末からログアウト
+                </button>
+              </div>
             </div>
 
-            <div class="plan-upgrade-note">
-              <strong>✨ プレミアム枠（プラス / プロ・準備中）</strong>
-              <p>
-                無料プランでは毎日の体調日記・採血の手入力・推移グラフ・CSV書き出しをそのままご利用いただけます。
-                今後の一般公開に向けて、紙の自動読み取り回数拡張や長期まとめレポートに対応するプレミアム枠を準備中です。
+            <!-- ② 各種 SNS アカウントの後追い連携（マルチログイン管理） -->
+            <div class="auth-section-block">
+              <h3 class="auth-sub-heading">② 各種 SNS アカウントの後追い連携（マルチログイン）</h3>
+              <p class="auth-section-note">
+                最初は Google で登録し、あとから LINE や Apple ID などを追加連携すると、どのアカウントからでも同じ「からだ手帳」にログインできます（メールアドレスが同じだけでは自動統合されない安全設計です）。
               </p>
+
+              <div class="sns-provider-grid">
+                @for (p of authProviders; track p.id) {
+                  @let linked = getLinkedIdentity(p.id);
+                  <div class="sns-provider-card" [class.linked]="!!linked">
+                    <div class="sns-provider-head">
+                      <span class="sns-icon-badge" [attr.data-provider]="p.id">{{ p.icon }}</span>
+                      <div class="sns-provider-info">
+                        <strong>{{ p.label }}</strong>
+                        @if (linked) {
+                          <span class="sns-linked-label">
+                            ✅ 連携済み（{{ linked.email_snapshot || linked.provider_subject }}）
+                          </span>
+                        } @else {
+                          <span class="sns-unlinked-label">未連携</span>
+                        }
+                      </div>
+                    </div>
+
+                    <div class="sns-provider-actions">
+                      @if (linked) {
+                        <button
+                          type="button"
+                          class="icon-danger-btn sns-action-btn"
+                          [disabled]="!canUnlinkIdentity || linkingProvider === p.id"
+                          (click)="unlinkProvider(p)"
+                        >
+                          {{ linkingProvider === p.id ? '処理中...' : '解除' }}
+                        </button>
+                        @if (!canUnlinkIdentity) {
+                          <span class="sns-lock-hint">※唯一のログイン手段のため解除できません</span>
+                        }
+                      } @else {
+                        <button
+                          type="button"
+                          class="btn-secondary small sns-action-btn"
+                          [disabled]="linkingProvider === p.id"
+                          (click)="linkProvider(p)"
+                        >
+                          {{ linkingProvider === p.id ? '連携中...' : '＋ 連携する' }}
+                        </button>
+                      }
+                    </div>
+                  </div>
+                }
+              </div>
             </div>
 
-            <div class="export-block">
-              <button type="button" class="btn-primary export-csv-btn" (click)="exportRecordsCsv()">
-                📥 記録を CSV で書き出す（Excel対応 UTF-8 BOM付き）
-              </button>
-              <p class="export-help">
-                全 {{ records.length }} 件の体調スコア・症状タグ・メモ・主要採血項目を端末に保存できます。診察時の持参やバックアップにご活用ください。
-              </p>
+            <!-- ③ 家族・知人を招待（Owner のみ表示） -->
+            @if (isOwnerAdmin) {
+              <div class="auth-section-block">
+                <h3 class="auth-sub-heading">③ 家族・知人を招待（管理者専用）</h3>
+                <p class="auth-section-note">
+                  招待リンクを 1 回限りで発行します。招待した方にはその人専用の「からだ手帳」が作られ、お互いの採血結果や体調日記は一切見えません。
+                </p>
+
+                <div class="invite-form-grid">
+                  <div class="field">
+                    <label for="inviteEmailInput">相手の Google メールアドレス *</label>
+                    <input
+                      id="inviteEmailInput"
+                      type="email"
+                      [(ngModel)]="inviteEmailInput"
+                      placeholder="例: family@gmail.com"
+                    />
+                  </div>
+                  <div class="field">
+                    <label for="inviteNoteInput">ひとことメモ（任意：奥さま用など）</label>
+                    <input
+                      id="inviteNoteInput"
+                      type="text"
+                      [(ngModel)]="inviteNoteInput"
+                      placeholder="例: 奥さま用"
+                    />
+                  </div>
+                </div>
+
+                <div class="invite-submit-row">
+                  <button
+                    type="button"
+                    class="btn-primary"
+                    [disabled]="creatingInvite"
+                    (click)="createInvitation()"
+                  >
+                    {{ creatingInvite ? '作成しています...' : '✉️ 招待リンクをつくる' }}
+                  </button>
+                </div>
+
+                @if (latestCreatedInviteUrl) {
+                  <div class="invite-url-box" role="status">
+                    <div class="invite-url-head">
+                      <strong>🎉 招待リンクができました（{{ latestCreatedInviteEmail }} 宛）</strong>
+                      <button
+                        type="button"
+                        class="btn-ghost small-btn"
+                        (click)="dismissCreatedInviteUrl()"
+                      >
+                        閉じる
+                      </button>
+                    </div>
+                    <p class="invite-url-warn">
+                      この URL を LINE などで相手に送ってください（安全のため、この画面を閉じると再表示されません。招待した方の手帳は、あなたの手帳とは別になります）
+                    </p>
+                    <div class="invite-url-code">{{ latestCreatedInviteUrl }}</div>
+                    <div class="invite-url-actions">
+                      <button type="button" class="btn-primary" (click)="copyInviteUrl()">
+                        📋 URLをコピー
+                      </button>
+                    </div>
+                  </div>
+                }
+
+                @if (invitations.length > 0) {
+                  <div class="invite-list">
+                    <div class="invite-list-title">発行済みの招待（{{ invitations.length }} 件）</div>
+                    @for (inv of invitations; track inv.token_preview + inv.created_at) {
+                      <div class="invite-item-card">
+                        <div class="invite-item-main">
+                          <div class="invite-item-top">
+                            <strong class="invite-item-email">{{ inv.email_display }}</strong>
+                            <span class="invite-status-badge" [ngClass]="'status-' + inv.status">
+                              {{ getInviteStatusLabel(inv.status) }}
+                            </span>
+                          </div>
+                          <div class="invite-item-meta">
+                            @if (inv.note) {
+                              <span>メモ: {{ inv.note }}</span>
+                              <span>•</span>
+                            }
+                            <span>有効期限: {{ formatDateShort(inv.expires_at) }}</span>
+                          </div>
+                        </div>
+                        @if (inv.status === 'pending') {
+                          <button
+                            type="button"
+                            class="icon-danger-btn"
+                            [disabled]="revokingTokenPreview === inv.token_preview"
+                            (click)="revokeInvitation(inv)"
+                          >
+                            {{ revokingTokenPreview === inv.token_preview ? '処理中...' : '取り消す' }}
+                          </button>
+                        }
+                      </div>
+                    }
+                  </div>
+                }
+              </div>
+            }
+
+            <!-- ④ データの書き出し & アカウント削除 -->
+            <div class="auth-section-block">
+              <h3 class="auth-sub-heading">④ データの書き出し &amp; アカウント削除</h3>
+              <div class="export-block">
+                <button type="button" class="btn-primary export-csv-btn" (click)="exportRecordsCsv()">
+                  📥 記録を CSV で書き出す（Excel対応 UTF-8 BOM付き）
+                </button>
+                <p class="export-help">
+                  全 {{ records.length }} 件の体調スコア・症状タグ・メモ・主要採血項目を端末に保存できます。診察時の持参やバックアップにご活用ください。
+                </p>
+              </div>
+
+              <div class="danger-zone-block">
+                <button
+                  type="button"
+                  class="btn-danger"
+                  [disabled]="deletingAccount"
+                  (click)="deleteAccount()"
+                >
+                  {{ deletingAccount ? '初期化しています...' : '🗑️ 自分の記録データを初期化する（アカウント削除）' }}
+                </button>
+                <p class="export-help">
+                  ※ あなたの採血結果・体調日記・アカウント情報をすべて初期化（削除）します。操作前に CSV バックアップをおすすめします。
+                </p>
+              </div>
             </div>
 
             <div class="policy-box">

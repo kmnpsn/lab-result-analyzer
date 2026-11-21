@@ -2,12 +2,17 @@ import { CommonModule } from '@angular/common';
 import { Component, OnInit } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import {
+  AUTH_PROVIDERS,
   AccountSummary,
   AiProviderName,
+  AuthProviderId,
+  AuthProviderMeta,
   BiologicalSex,
+  InvitationSummary,
   LabFlag,
   LabItem,
   LabRecord,
+  LinkedIdentity,
   REFERENCE_STANDARDS,
   RecordType,
   ReferenceStandard,
@@ -129,7 +134,27 @@ export class AppComponent implements OnInit {
   readonly providerMeta = PROVIDER_META;
   readonly wellnessMetrics = WELLNESS_METRICS;
   readonly symptomTagPresets = SYMPTOM_TAG_PRESETS;
+  readonly authProviders = AUTH_PROVIDERS;
   readonly quickChartCodes = ['Hb', 'CRP', 'Ferritin', 'ALT', 'eGFR', 'HbA1c', 'WBC', 'TSH', 'LDL'];
+
+  // 招待URLバナー & 認証エラー通知
+  inviteToken: string | null = null;
+  inviteChecking = false;
+  inviteState: 'none' | 'valid' | 'invalid' = 'none';
+  inviteEmailHint = '';
+  inviteReason = '';
+  authErrorBanner = '';
+
+  // タブ4: 認証・SNS連携・家族招待・アカウント削除
+  authBusy = false;
+  linkingProvider: AuthProviderId | null = null;
+  inviteEmailInput = '';
+  inviteNoteInput = '';
+  creatingInvite = false;
+  latestCreatedInviteUrl = '';
+  latestCreatedInviteEmail = '';
+  revokingTokenPreview: string | null = null;
+  deletingAccount = false;
 
   // サーキットブレーカー / メンテナンス待機画面
   previewServicePause = false;
@@ -180,11 +205,62 @@ export class AppComponent implements OnInit {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       this.isAdminMode = params.get('admin') === '1';
+
+      // /invite/<token> パスまたは ?invite=<token> クエリを検出
+      const pathMatch = window.location.pathname.match(/^\/invite\/([^/?#]+)/);
+      const tokenFromPath = pathMatch ? decodeURIComponent(pathMatch[1]) : null;
+      const tokenFromQuery = params.get('invite');
+      this.inviteToken = (tokenFromPath || tokenFromQuery || '').trim() || null;
+
+      // 認証コールバックからのエラー案内
+      const authError = params.get('auth_error') || params.get('error');
+      if (authError === 'not_invited') {
+        this.authErrorBanner =
+          'この Google アカウントは招待されていません。招待リンクを受け取ったメールアドレスでログインしてください。';
+      } else if (authError) {
+        this.authErrorBanner =
+          'ログイン処理が完了できませんでした。時間をおいてもう一度お試しください。';
+      }
     }
   }
 
   async ngOnInit(): Promise<void> {
-    await this.loadInitialData();
+    const tasks: Array<Promise<unknown>> = [this.loadInitialData()];
+    if (this.inviteToken) {
+      tasks.push(this.verifyInviteToken(this.inviteToken));
+    }
+    await Promise.all(tasks);
+  }
+
+  private async verifyInviteToken(token: string): Promise<void> {
+    this.inviteChecking = true;
+    try {
+      const res = await this.api.verifyInvite(token);
+      if (res.valid) {
+        this.inviteState = 'valid';
+        this.inviteEmailHint = res.email_hint || '';
+        this.inviteReason = '';
+      } else {
+        this.inviteState = 'invalid';
+        this.inviteReason = res.reason || 'not_found';
+      }
+    } catch {
+      this.inviteState = 'invalid';
+      this.inviteReason = 'not_found';
+    } finally {
+      this.inviteChecking = false;
+    }
+  }
+
+  dismissInviteBanner(): void {
+    this.inviteState = 'none';
+    this.inviteToken = null;
+    this.inviteEmailHint = '';
+    this.inviteReason = '';
+  }
+
+  dismissAuthErrorBanner(): void {
+    this.authErrorBanner = '';
   }
 
   private async loadInitialData(): Promise<void> {
@@ -1200,5 +1276,243 @@ export class AppComponent implements OnInit {
 
   getStandardRangeForSex(std: ReferenceStandard, sex: BiologicalSex): [number, number] {
     return std[sex] || std.other;
+  }
+
+  // ===== 認証・SNS後追い連携・家族招待・アカウント削除 =====
+
+  get linkedIdentities(): LinkedIdentity[] {
+    return this.account.linked_identities ?? [];
+  }
+
+  getLinkedIdentity(provider: AuthProviderId): LinkedIdentity | undefined {
+    return this.linkedIdentities.find((id) => id.provider === provider);
+  }
+
+  get canUnlinkIdentity(): boolean {
+    return this.linkedIdentities.length > 1;
+  }
+
+  get isOwnerAdmin(): boolean {
+    return this.account.service_role === 'admin';
+  }
+
+  get invitations(): InvitationSummary[] {
+    return this.account.invitations ?? [];
+  }
+
+  getAuthModeLabel(): string {
+    return this.account.auth_mode === 'production' ? '本番認証' : 'デモ';
+  }
+
+  getInviteStatusLabel(status: InvitationSummary['status']): string {
+    switch (status) {
+      case 'pending':
+        return '待っています';
+      case 'used':
+        return '使いました';
+      case 'expired':
+        return '期限切れ';
+      case 'revoked':
+        return '取り消し';
+      default:
+        return status;
+    }
+  }
+
+  formatDateShort(iso: string | undefined): string {
+    if (!iso) return '';
+    return iso.slice(0, 10);
+  }
+
+  startGoogleLogin(inviteToken?: string): void {
+    if (typeof window === 'undefined') return;
+    const url = this.api.getGoogleLoginUrl(inviteToken);
+    if (this.api.isOffline) {
+      this.account = {
+        ...this.account,
+        authenticated: true,
+        email: this.account.email || 'owner@example.com',
+      };
+      this.dismissInviteBanner();
+      this.showToast('デモ環境で Google ログインを実行しました', 'success');
+      return;
+    }
+    window.location.href = url;
+  }
+
+  async linkProvider(provider: AuthProviderMeta): Promise<void> {
+    if (this.linkingProvider) return;
+    this.linkingProvider = provider.id;
+    try {
+      const updated = await this.api.linkIdentity({
+        provider: provider.id,
+        email: this.account.email ?? undefined,
+        display_name: this.profile.name || this.account.display_name,
+      });
+      this.account = {
+        ...this.account,
+        linked_identities: updated,
+      };
+      this.showToast(`${provider.label} アカウントを連携しました`, 'success');
+    } catch (err) {
+      if (!this.isServicePaused) {
+        this.showToast(this.api.getErrorMessage(err, 'write'), 'error');
+      }
+    } finally {
+      this.linkingProvider = null;
+    }
+  }
+
+  async unlinkProvider(provider: AuthProviderMeta): Promise<void> {
+    if (this.linkingProvider || !this.canUnlinkIdentity) return;
+    if (!confirm(`${provider.label} のログイン連携を解除しますか？`)) {
+      return;
+    }
+    this.linkingProvider = provider.id;
+    try {
+      const updated = await this.api.unlinkIdentity(provider.id);
+      this.account = {
+        ...this.account,
+        linked_identities: updated,
+      };
+      this.showToast(`${provider.label} の連携を解除しました`, 'info');
+    } catch (err) {
+      if (!this.isServicePaused) {
+        this.showToast(this.api.getErrorMessage(err, 'delete'), 'error');
+      }
+    } finally {
+      this.linkingProvider = null;
+    }
+  }
+
+  async createInvitation(): Promise<void> {
+    const email = this.inviteEmailInput.trim();
+    if (!email || !email.includes('@')) {
+      this.showToast('招待する相手の Google メールアドレスを入力してください', 'error');
+      return;
+    }
+    this.creatingInvite = true;
+    try {
+      const res = await this.api.createInvitation({
+        email,
+        note: this.inviteNoteInput.trim() || undefined,
+      });
+      this.latestCreatedInviteUrl = res.invite_url || res.invitation.invite_url || '';
+      this.latestCreatedInviteEmail = res.invitation.email_display || email;
+      const existing = this.account.invitations ?? [];
+      this.account = {
+        ...this.account,
+        invitations: [res.invitation, ...existing.filter((x) => x.token_preview !== res.invitation.token_preview)],
+      };
+      this.inviteEmailInput = '';
+      this.inviteNoteInput = '';
+      this.showToast('招待リンクを作成しました。相手に共有してください', 'success');
+    } catch (err) {
+      if (!this.isServicePaused) {
+        this.showToast(this.api.getErrorMessage(err, 'write'), 'error');
+      }
+    } finally {
+      this.creatingInvite = false;
+    }
+  }
+
+  async copyInviteUrl(): Promise<void> {
+    if (!this.latestCreatedInviteUrl) return;
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(this.latestCreatedInviteUrl);
+      } else if (typeof document !== 'undefined') {
+        const ta = document.createElement('textarea');
+        ta.value = this.latestCreatedInviteUrl;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      this.showToast('招待 URL をクリップボードにコピーしました', 'success');
+    } catch {
+      this.showToast('コピーに失敗しました。URLを選択して手動でコピーしてください', 'error');
+    }
+  }
+
+  dismissCreatedInviteUrl(): void {
+    this.latestCreatedInviteUrl = '';
+    this.latestCreatedInviteEmail = '';
+  }
+
+  async revokeInvitation(inv: InvitationSummary): Promise<void> {
+    if (this.revokingTokenPreview) return;
+    if (!confirm(`${inv.email_display} 宛の招待リンクを取り消しますか？`)) {
+      return;
+    }
+    this.revokingTokenPreview = inv.token_preview;
+    try {
+      await this.api.revokeInvitation(inv.token_preview);
+      this.account = {
+        ...this.account,
+        invitations: (this.account.invitations ?? []).map((item) =>
+          item.token_preview === inv.token_preview ? { ...item, status: 'revoked' as const } : item
+        ),
+      };
+      this.showToast('招待リンクを取り消しました', 'info');
+    } catch (err) {
+      if (!this.isServicePaused) {
+        this.showToast(this.api.getErrorMessage(err, 'delete'), 'error');
+      }
+    } finally {
+      this.revokingTokenPreview = null;
+    }
+  }
+
+  async logout(allDevices = false): Promise<void> {
+    if (this.authBusy) return;
+    const msg = allDevices
+      ? 'すべての端末（スマホ・PC など）からログアウトしますか？'
+      : 'この端末からログアウトしますか？';
+    if (!confirm(msg)) return;
+    this.authBusy = true;
+    try {
+      await this.api.logout(allDevices);
+      const nextSession = await this.api.getSession();
+      this.account = nextSession;
+      this.showToast(
+        allDevices ? 'すべての端末からログアウトしました' : 'この端末からログアウトしました',
+        'info'
+      );
+    } catch (err) {
+      if (!this.isServicePaused) {
+        this.showToast(this.api.getErrorMessage(err, 'write'), 'error');
+      }
+    } finally {
+      this.authBusy = false;
+    }
+  }
+
+  async deleteAccount(): Promise<void> {
+    if (this.deletingAccount) return;
+    const ok = confirm(
+      '自分の記録データとアカウント情報をすべて初期化（削除）しますか？\n※ この操作は取り消せません。必要な場合は先に CSV で書き出してください。'
+    );
+    if (!ok) return;
+    this.deletingAccount = true;
+    try {
+      const res = await this.api.deleteAccount();
+      this.dismissCreatedInviteUrl();
+      await this.loadInitialData();
+      this.showToast(
+        res.reset_demo
+          ? 'デモデータを初期状態にリセットしました'
+          : 'アカウントと記録データを初期化しました',
+        'info'
+      );
+    } catch (err) {
+      if (!this.isServicePaused) {
+        this.showToast(this.api.getErrorMessage(err, 'delete'), 'error');
+      }
+    } finally {
+      this.deletingAccount = false;
+    }
   }
 }

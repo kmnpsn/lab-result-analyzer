@@ -29,6 +29,12 @@ import {
   resetSecurityState,
   type SecurityEnv,
 } from './security.ts';
+import {
+  handleAuthAndInviteRoutes,
+  resetAuthMemoryStore,
+  resolveCurrentSessionContext,
+  type AuthEnv,
+} from './auth.ts';
 
 export interface D1PreparedStatementLike {
   bind(...values: unknown[]): D1PreparedStatementLike;
@@ -43,7 +49,7 @@ export interface D1DatabaseLike {
   exec?(query: string): Promise<unknown>;
 }
 
-export interface WorkerEnv extends AiEnv, SecurityEnv {
+export interface WorkerEnv extends AiEnv, SecurityEnv, AuthEnv {
   DB?: D1DatabaseLike;
   REGISTRATION_MODE?: RegistrationMode;
   ASSETS?: {
@@ -86,13 +92,29 @@ export function createDefaultAccount(profile?: UserProfile, env?: WorkerEnv): Ac
       : 'invite_only';
   return {
     registration_mode: regMode,
+    auth_mode: env?.AUTH_MODE === 'production' ? 'production' : 'demo',
     authenticated: true,
-    email: null,
+    user_id: 1,
+    service_role: 'admin',
+    email: 'owner@example.com',
     display_name: profile?.name || 'サンプル利用者',
     plan_tier: 'free',
     monthly_ocr_used: 1,
     monthly_ocr_limit: 10,
     terms_accepted: true,
+    csrf_token: 'csrf_demo_default_token_001',
+    linked_identities: [
+      {
+        id: 1,
+        provider: 'google',
+        provider_subject: 'demo-google-sub-001',
+        email_snapshot: 'owner@example.com',
+        display_name_snapshot: 'サンプル利用者 (Google)',
+        linked_at: '2026-11-10T09:00:00Z',
+        last_used_at: '2026-11-10T09:00:00Z',
+      },
+    ],
+    invitations: [],
   };
 }
 
@@ -378,6 +400,7 @@ let memoryStore: MemoryStoreState = createInitialMemoryState();
 
 export function resetMemoryStore(): void {
   memoryStore = createInitialMemoryState();
+  resetAuthMemoryStore();
   resetSecurityState();
 }
 
@@ -482,14 +505,47 @@ export async function ensureD1Schema(db: D1DatabaseLike): Promise<void> {
     .prepare(
       `CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        public_id TEXT UNIQUE,
         email TEXT UNIQUE,
         display_name TEXT NOT NULL DEFAULT 'ゲスト',
         role TEXT NOT NULL DEFAULT 'owner' CHECK (role IN ('owner', 'member')),
+        service_role TEXT NOT NULL DEFAULT 'admin' CHECK (service_role IN ('admin', 'user')),
         plan_tier TEXT NOT NULL DEFAULT 'free' CHECK (plan_tier IN ('free', 'plus', 'pro')),
         monthly_ocr_used INTEGER NOT NULL DEFAULT 0,
         monthly_ocr_limit INTEGER NOT NULL DEFAULT 10,
         terms_accepted_at TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`
+    )
+    .run();
+
+  try {
+    await db.prepare(`ALTER TABLE users ADD COLUMN public_id TEXT`).run();
+  } catch {
+    // 既に存在する場合は無視
+  }
+  try {
+    await db
+      .prepare(
+        `ALTER TABLE users ADD COLUMN service_role TEXT NOT NULL DEFAULT 'admin' CHECK (service_role IN ('admin', 'user'))`
+      )
+      .run();
+  } catch {
+    // 既に存在する場合は無視
+  }
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS auth_identities (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        provider_subject TEXT NOT NULL,
+        email_snapshot TEXT,
+        display_name_snapshot TEXT,
+        linked_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_used_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(provider, provider_subject)
       )`
     )
     .run();
@@ -501,23 +557,56 @@ export async function ensureD1Schema(db: D1DatabaseLike): Promise<void> {
         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         csrf_token TEXT NOT NULL,
         expires_at TEXT NOT NULL,
+        absolute_expires_at TEXT,
+        revoked_at TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       )`
     )
     .run();
 
+  try {
+    await db.prepare(`ALTER TABLE auth_sessions ADD COLUMN revoked_at TEXT`).run();
+  } catch {
+    // 既に存在する場合は無視
+  }
+
   await db
     .prepare(
       `CREATE TABLE IF NOT EXISTS invitations (
         token TEXT PRIMARY KEY,
+        email_normalized TEXT NOT NULL DEFAULT '',
+        email_display TEXT NOT NULL DEFAULT '',
         created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         note TEXT NOT NULL DEFAULT '',
         consumed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        consumed_at TEXT,
+        revoked_at TEXT,
         expires_at TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       )`
     )
     .run();
+
+  try {
+    await db.prepare(`ALTER TABLE invitations ADD COLUMN email_normalized TEXT NOT NULL DEFAULT ''`).run();
+  } catch {
+    // ignore
+  }
+  try {
+    await db.prepare(`ALTER TABLE invitations ADD COLUMN email_display TEXT NOT NULL DEFAULT ''`).run();
+  } catch {
+    // ignore
+  }
+  try {
+    await db.prepare(`ALTER TABLE invitations ADD COLUMN consumed_at TEXT`).run();
+  } catch {
+    // ignore
+  }
+  try {
+    await db.prepare(`ALTER TABLE invitations ADD COLUMN revoked_at TEXT`).run();
+  } catch {
+    // ignore
+  }
 }
 
 async function ensureD1Seeded(db: D1DatabaseLike): Promise<void> {
@@ -546,10 +635,17 @@ async function ensureD1Seeded(db: D1DatabaseLike): Promise<void> {
 
   await db
     .prepare(
-      `INSERT OR IGNORE INTO users (id, email, display_name, role, plan_tier, monthly_ocr_used, monthly_ocr_limit)
-       VALUES (1, null, ?, 'owner', 'free', 1, 10)`
+      `INSERT OR IGNORE INTO users (id, public_id, email, display_name, role, service_role, plan_tier, monthly_ocr_used, monthly_ocr_limit)
+       VALUES (1, 'u_owner_default', 'owner@example.com', ?, 'owner', 'admin', 'free', 1, 10)`
     )
     .bind(defaultProfile.name)
+    .run();
+
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO auth_identities (user_id, provider, provider_subject, email_snapshot, display_name_snapshot)
+       VALUES (1, 'google', 'demo-google-sub-001', 'owner@example.com', 'サンプル利用者 (Google)')`
+    )
     .run();
 
   const countRow = await db.prepare('SELECT COUNT(*) as cnt FROM lab_records').first<{ cnt: number }>();
@@ -732,7 +828,10 @@ async function insertRecordIntoD1(db: D1DatabaseLike, record: LabRecord): Promis
   };
 }
 
-async function getRepositoryData(env: WorkerEnv): Promise<{
+async function getRepositoryData(
+  env: WorkerEnv,
+  request?: Request
+): Promise<{
   useD1: boolean;
   profile: UserProfile;
   account: AccountSummary;
@@ -741,15 +840,16 @@ async function getRepositoryData(env: WorkerEnv): Promise<{
   if (env.DB) {
     await ensureD1Seeded(env.DB);
     const profile = await getProfileFromD1(env.DB);
-    const account = await getAccountFromD1(env.DB, profile, env);
+    const sessionCtx = await resolveCurrentSessionContext(request, env, profile);
+    const account = sessionCtx.authenticated
+      ? sessionCtx.account
+      : await getAccountFromD1(env.DB, profile, env);
     const records = await getRecordsFromD1(env.DB);
     return { useD1: true, profile, account, records };
   }
   const profile = { ...memoryStore.profile };
-  const account = {
-    ...createDefaultAccount(profile, env),
-    display_name: profile.name,
-  };
+  const sessionCtx = await resolveCurrentSessionContext(request, env, profile);
+  const account = sessionCtx.account;
   return {
     useD1: false,
     profile,
@@ -882,12 +982,37 @@ export default {
     }
 
     try {
+      // 0. Auth & Invite API routes (/api/auth/* and /api/invite/*/verify)
+      if (path.startsWith('/api/auth/') || path.startsWith('/api/invite/')) {
+        const authRes = await handleAuthAndInviteRoutes({
+          request,
+          env,
+          requestId,
+          fallbackProfile: memoryStore.profile,
+          onResetAccountRecords: async (_userId, isDemoReset) => {
+            if (isDemoReset) {
+              const initial = createInitialMemoryState();
+              memoryStore.profile = initial.profile;
+              memoryStore.account = initial.account;
+              memoryStore.records = initial.records;
+              memoryStore.nextRecordId = initial.nextRecordId;
+              memoryStore.nextItemId = initial.nextItemId;
+            } else {
+              memoryStore.records = [];
+            }
+          },
+        });
+        if (authRes) {
+          return authRes;
+        }
+      }
+
       // 1. GET /api/bootstrap
       if (path === '/api/bootstrap') {
         if (request.method !== 'GET') {
           return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
         }
-        const { profile, account, records } = await getRepositoryData(env);
+        const { profile, account, records } = await getRepositoryData(env, request);
         return jsonResponse(
           {
             profile,
@@ -1264,17 +1389,30 @@ export default {
         return createErrorResponse('ROUTE_NOT_FOUND', requestId, { route: path });
       }
 
+      // /invite/:token アクセス時は Referrer-Policy: no-referrer かつ Cache-Control: no-store で SPA ASSETS を返す
+      const isInvitePage = path.startsWith('/invite/');
+      const extraSpaHeaders: Record<string, string> | undefined = isInvitePage
+        ? {
+            'Referrer-Policy': 'no-referrer',
+            'Cache-Control': 'no-store',
+          }
+        : undefined;
+
       // 8. Delegate non-API requests to Cloudflare static assets binding
       if (env.ASSETS && typeof env.ASSETS.fetch === 'function') {
-        const assetRes = await env.ASSETS.fetch(request);
-        return finalizeResponse(assetRes, requestId);
+        let assetRes = await env.ASSETS.fetch(request);
+        if (isInvitePage && assetRes.status === 404) {
+          const indexUrl = new URL('/', request.url);
+          assetRes = await env.ASSETS.fetch(new Request(indexUrl.toString(), request));
+        }
+        return finalizeResponse(assetRes, requestId, extraSpaHeaders);
       }
 
       const rootRes = new Response('からだノート Worker is running.', {
         status: 200,
         headers: { 'Content-Type': 'text/plain; charset=utf-8' },
       });
-      return finalizeResponse(rootRes, requestId);
+      return finalizeResponse(rootRes, requestId, extraSpaHeaders);
     } catch {
       // 内部エラー（DB例外等）発生時はサーキットブレーカーの失敗カウンタを進め、
       // 生のエラーメッセージや患者データは一切出力せず ADR-030 固定エラーコードを返す

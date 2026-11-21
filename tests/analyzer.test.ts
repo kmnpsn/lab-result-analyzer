@@ -531,3 +531,443 @@ describe('3段構えのセキュリティ防御・サーキットブレーカー
     assert.equal(circuitJson.error.code, 'CIRCUIT_OPEN');
   });
 });
+
+describe('本番ログイン・初回Owner・招待制・SNS後追い連携 (worker/auth.ts)', () => {
+  beforeEach(() => {
+    resetMemoryStore();
+    resetSecurityState();
+  });
+
+  it('GET /api/bootstrap と GET /api/auth/session に linked_identities / invitations / service_role / csrf_token が含まれる', async () => {
+    const bootRes = await worker.fetch(new Request('http://localhost/api/bootstrap'), {});
+    assert.equal(bootRes.status, 200);
+    const bootData = (await bootRes.json()) as { account: AccountSummary };
+    assert.equal(bootData.account.authenticated, true);
+    assert.equal(bootData.account.service_role, 'admin');
+    assert.ok(bootData.account.csrf_token);
+    assert.ok(Array.isArray(bootData.account.linked_identities));
+    assert.equal(bootData.account.linked_identities?.length, 1);
+    assert.equal(bootData.account.linked_identities?.[0].provider, 'google');
+    assert.ok(Array.isArray(bootData.account.invitations));
+
+    const sessionRes = await worker.fetch(new Request('http://localhost/api/auth/session'), {});
+    assert.equal(sessionRes.status, 200);
+    assert.equal(sessionRes.headers.get('referrer-policy'), 'no-referrer');
+    assert.equal(sessionRes.headers.get('cache-control'), 'no-store');
+    const sessionData = (await sessionRes.json()) as AccountSummary;
+    assert.equal(sessionData.authenticated, true);
+    assert.equal(sessionData.service_role, 'admin');
+    assert.equal(sessionData.linked_identities?.length, 1);
+  });
+
+  it('初回Owner登録 (BOOTSTRAP_OWNER_EMAIL): 管理者不在時に BOOTSTRAP_OWNER_EMAIL 一致で admin 登録でき、未招待の別メールは 403 で拒否される', async () => {
+    const env = {
+      BOOTSTRAP_OWNER_EMAIL: 'first-owner@example.com',
+      REGISTRATION_MODE: 'invite_only' as const,
+    };
+
+    // 1. BOOTSTRAP_OWNER_EMAIL と異なる未招待メールは 403 で拒否
+    const strangerRes = await worker.fetch(
+      new Request(
+        'http://localhost/api/auth/google/start?mock_email=stranger@example.com&mock_sub=sub-stranger-1'
+      ),
+      env
+    );
+    assert.equal(strangerRes.status, 403);
+    const strangerBody = (await strangerRes.json()) as { authenticated: boolean; reason: string };
+    assert.equal(strangerBody.authenticated, false);
+    assert.equal(strangerBody.reason, 'not_invited');
+
+    // 2. BOOTSTRAP_OWNER_EMAIL と一致するメールは招待なしで初回 Owner (service_role='admin') として登録される
+    const ownerRes = await worker.fetch(
+      new Request(
+        'http://localhost/api/auth/google/start?mock_email=first-owner@example.com&mock_sub=sub-owner-1&mock_name=初代オーナー'
+      ),
+      env
+    );
+    assert.equal(ownerRes.status, 200);
+    const setCookie = ownerRes.headers.get('set-cookie') || '';
+    assert.ok(setCookie.includes('__Host-karada_session='));
+    const ownerData = (await ownerRes.json()) as AccountSummary & { is_new_user: boolean };
+    assert.equal(ownerData.authenticated, true);
+    assert.equal(ownerData.service_role, 'admin');
+    assert.equal(ownerData.email, 'first-owner@example.com');
+    assert.equal(ownerData.is_new_user, true);
+
+    // 3. 初回Owner登録後は、別の未登録ユーザーが招待なしでアクセスしても 403 で拒否される
+    const secondRes = await worker.fetch(
+      new Request(
+        'http://localhost/api/auth/google/callback?mock_email=second@example.com&mock_sub=sub-second-1'
+      ),
+      env
+    );
+    assert.equal(secondRes.status, 403);
+  });
+
+  it('Google OIDC 本番設定時は PKCE (S256) + state + nonce + __Host-karada_oauth Cookie 付きで 302 リダイレクトする', async () => {
+    const prodEnv = {
+      AUTH_MODE: 'production' as const,
+      GOOGLE_CLIENT_ID: 'my-google-client-id.apps.googleusercontent.com',
+      GOOGLE_REDIRECT_URI: 'https://karada.example.com/api/auth/google/callback',
+      OAUTH_TRANSACTION_SECRET: 'test-oauth-tx-secret',
+    };
+
+    const startRes = await worker.fetch(
+      new Request('https://karada.example.com/api/auth/google/start?invite=sample_token_123'),
+      prodEnv
+    );
+    assert.equal(startRes.status, 302);
+    assert.equal(startRes.headers.get('referrer-policy'), 'no-referrer');
+    assert.equal(startRes.headers.get('cache-control'), 'no-store');
+
+    const location = startRes.headers.get('location') || '';
+    assert.ok(location.startsWith('https://accounts.google.com/o/oauth2/v2/auth?'));
+    const authUrl = new URL(location);
+    assert.equal(authUrl.searchParams.get('client_id'), prodEnv.GOOGLE_CLIENT_ID);
+    assert.equal(authUrl.searchParams.get('code_challenge_method'), 'S256');
+    assert.ok(authUrl.searchParams.get('code_challenge'));
+    assert.ok(authUrl.searchParams.get('state'));
+    assert.ok(authUrl.searchParams.get('nonce'));
+
+    const oauthCookie = startRes.headers.get('set-cookie') || '';
+    assert.ok(oauthCookie.includes('__Host-karada_oauth='));
+  });
+
+  it('招待リンク作成・検証・別メール拒否・受諾（原子的消費）・再利用拒否・期限切れ/取消拒否が一貫して動作する', async () => {
+    // 1. Owner が招待リンクを作成
+    const createInvRes = await worker.fetch(
+      new Request('http://localhost/api/auth/invitations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'Family.Member@example.com',
+          note: '家族用の招待',
+          expiresInDays: 7,
+        }),
+      }),
+      {}
+    );
+    assert.equal(createInvRes.status, 201);
+    const invPayload = (await createInvRes.json()) as {
+      invitation: { token_preview: string; status: string; email_display: string };
+      invite_url: string;
+    };
+    assert.ok(invPayload.invite_url.startsWith('http://localhost/invite/'));
+    assert.equal(invPayload.invitation.status, 'pending');
+    const rawToken = invPayload.invite_url.split('/invite/')[1];
+    assert.ok(rawToken && rawToken.length >= 32);
+
+    // 2. /invite/:token ページアクセス時に Referrer-Policy: no-referrer & Cache-Control: no-store が付与される
+    const pageRes = await worker.fetch(
+      new Request(`http://localhost/invite/${rawToken}`, { method: 'GET' }),
+      {}
+    );
+    assert.equal(pageRes.status, 200);
+    assert.equal(pageRes.headers.get('referrer-policy'), 'no-referrer');
+    assert.equal(pageRes.headers.get('cache-control'), 'no-store');
+
+    // 3. GET /api/invite/:token/verify で有効と判定される
+    const verifyRes = await worker.fetch(
+      new Request(`http://localhost/api/invite/${rawToken}/verify`),
+      {}
+    );
+    assert.equal(verifyRes.status, 200);
+    assert.equal(verifyRes.headers.get('referrer-policy'), 'no-referrer');
+    const verifyJson = (await verifyRes.json()) as {
+      valid: boolean;
+      email_hint: string;
+      reason?: string;
+    };
+    assert.equal(verifyJson.valid, true);
+    assert.ok(verifyJson.email_hint.includes('@example.com'));
+
+    // 4. 招待されていない別メールアドレスで受諾しようとすると 403 で拒否され、招待は消費されない
+    const wrongEmailRes = await worker.fetch(
+      new Request(
+        `http://localhost/api/auth/google/start?invite=${rawToken}&mock_email=other@example.com&mock_sub=sub-other`
+      ),
+      {}
+    );
+    assert.equal(wrongEmailRes.status, 403);
+    const wrongEmailJson = (await wrongEmailRes.json()) as { reason: string };
+    assert.equal(wrongEmailJson.reason, 'email_mismatch');
+
+    // 5. 正しいメールアドレスで招待を受諾すると service_role='user' で新規作成・ログインできる
+    const acceptRes = await worker.fetch(
+      new Request(
+        `http://localhost/api/auth/google/start?invite=${rawToken}&mock_email=family.member@example.com&mock_sub=sub-family-1&mock_name=家族メンバー`
+      ),
+      {}
+    );
+    assert.equal(acceptRes.status, 200);
+    const acceptData = (await acceptRes.json()) as AccountSummary;
+    assert.equal(acceptData.authenticated, true);
+    assert.equal(acceptData.service_role, 'user');
+    assert.equal(acceptData.email, 'family.member@example.com');
+
+    // 6. 消費済みの招待トークンを再度 verify すると valid: false, reason: 'used' になり再利用も 403 になる
+    const verifyUsedRes = await worker.fetch(
+      new Request(`http://localhost/api/invite/${rawToken}/verify`),
+      {}
+    );
+    const verifyUsedJson = (await verifyUsedRes.json()) as { valid: boolean; reason?: string };
+    assert.equal(verifyUsedJson.valid, false);
+    assert.equal(verifyUsedJson.reason, 'used');
+
+    const reuseRes = await worker.fetch(
+      new Request(
+        `http://localhost/api/auth/google/start?invite=${rawToken}&mock_email=family.member@example.com&mock_sub=sub-family-2`
+      ),
+      {}
+    );
+    assert.equal(reuseRes.status, 403);
+
+    // 7. 一般ユーザー (service_role='user') は招待リンクを作成できない (403 AUTH_NOT_ADMIN)
+    const nonAdminInvRes = await worker.fetch(
+      new Request('http://localhost/api/auth/invitations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'another@example.com' }),
+      }),
+      {}
+    );
+    assert.equal(nonAdminInvRes.status, 403);
+  });
+
+  it('招待の取り消し (revoked) および期限切れ (expired) が正しく拒否される', async () => {
+    // 1. 招待作成と取り消し
+    const createRes = await worker.fetch(
+      new Request('http://localhost/api/auth/invitations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'revoke-target@example.com', note: '取消テスト' }),
+      }),
+      {}
+    );
+    const created = (await createRes.json()) as {
+      invitation: { token_preview: string };
+      invite_url: string;
+    };
+    const token = created.invite_url.split('/invite/')[1];
+
+    const delRes = await worker.fetch(
+      new Request(`http://localhost/api/auth/invitations/${created.invitation.token_preview}`, {
+        method: 'DELETE',
+      }),
+      {}
+    );
+    assert.equal(delRes.status, 200);
+
+    const verifyRevoked = await worker.fetch(
+      new Request(`http://localhost/api/invite/${token}/verify`),
+      {}
+    );
+    const verifyRevokedJson = (await verifyRevoked.json()) as { valid: boolean; reason?: string };
+    assert.equal(verifyRevokedJson.valid, false);
+    assert.equal(verifyRevokedJson.reason, 'revoked');
+
+    const useRevokedRes = await worker.fetch(
+      new Request(
+        `http://localhost/api/auth/google/start?invite=${token}&mock_email=revoke-target@example.com&mock_sub=sub-revoked`
+      ),
+      {}
+    );
+    assert.equal(useRevokedRes.status, 403);
+
+    // 2. 期限切れ (expired) 招待の検証と受諾拒否
+    const expCreateRes = await worker.fetch(
+      new Request('http://localhost/api/auth/invitations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'expired-target@example.com',
+          note: '期限切れテスト',
+          expiresInDays: -1,
+        }),
+      }),
+      {}
+    );
+    const expCreated = (await expCreateRes.json()) as { invite_url: string };
+    const expToken = expCreated.invite_url.split('/invite/')[1];
+
+    const verifyExpired = await worker.fetch(
+      new Request(`http://localhost/api/invite/${expToken}/verify`),
+      {}
+    );
+    const verifyExpiredJson = (await verifyExpired.json()) as { valid: boolean; reason?: string };
+    assert.equal(verifyExpiredJson.valid, false);
+    assert.equal(verifyExpiredJson.reason, 'expired');
+
+    const useExpiredRes = await worker.fetch(
+      new Request(
+        `http://localhost/api/auth/google/start?invite=${expToken}&mock_email=expired-target@example.com&mock_sub=sub-expired`
+      ),
+      {}
+    );
+    assert.equal(useExpiredRes.status, 403);
+    const useExpiredJson = (await useExpiredRes.json()) as { reason: string };
+    assert.equal(useExpiredJson.reason, 'expired');
+  });
+
+  it('SNS後追い連携の追加・重複拒否 (409 STATE_CONFLICT)・最後の1件解除拒否 (409 STATE_CONFLICT) が動作する', async () => {
+    // 1. 初期状態（Google 1件のみ）で唯一のログイン手段を解除しようとすると 409 STATE_CONFLICT で拒否される
+    const unlinkLastRes = await worker.fetch(
+      new Request('http://localhost/api/auth/identities/google', { method: 'DELETE' }),
+      {}
+    );
+    assert.equal(unlinkLastRes.status, 409);
+    const unlinkLastBody = (await unlinkLastRes.json()) as { error: { code: string; message: string } };
+    assert.equal(unlinkLastBody.error.code, 'STATE_CONFLICT');
+    assert.ok(unlinkLastBody.error.message.includes('最後のログイン手段は解除できません'));
+
+    // 2. LINE と Apple ID を後追い連携追加する
+    const linkLineRes = await worker.fetch(
+      new Request('http://localhost/api/auth/identities/link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'line',
+          provider_subject: 'line-sub-owner-001',
+          email: 'owner-line@example.com',
+          display_name: 'LINE連携アカウント',
+        }),
+      }),
+      {}
+    );
+    assert.equal(linkLineRes.status, 200);
+    const linkLineData = (await linkLineRes.json()) as {
+      linked_identities: Array<{ provider: string; provider_subject: string }>;
+    };
+    assert.equal(linkLineData.linked_identities.length, 2);
+    assert.ok(linkLineData.linked_identities.some((i) => i.provider === 'line'));
+
+    const linkAppleRes = await worker.fetch(
+      new Request('http://localhost/api/auth/identities/link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'apple',
+          provider_subject: 'apple-sub-owner-001',
+        }),
+      }),
+      {}
+    );
+    assert.equal(linkAppleRes.status, 200);
+    const linkAppleData = (await linkAppleRes.json()) as {
+      linked_identities: Array<{ provider: string }>;
+    };
+    assert.equal(linkAppleData.linked_identities.length, 3);
+
+    // 3. 同じ provider / provider_subject を重複連携しようとすると 409 STATE_CONFLICT で拒否される
+    const dupRes = await worker.fetch(
+      new Request('http://localhost/api/auth/identities/link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'line',
+          provider_subject: 'line-sub-owner-001',
+        }),
+      }),
+      {}
+    );
+    assert.equal(dupRes.status, 409);
+    const dupBody = (await dupRes.json()) as { error: { code: string } };
+    assert.equal(dupBody.error.code, 'STATE_CONFLICT');
+
+    // 4. 別ユーザーが既に連携済みの (provider, provider_subject) を乗っ取り連携しようとしても 409 STATE_CONFLICT で拒否される
+    const invRes = await worker.fetch(
+      new Request('http://localhost/api/auth/invitations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'user2@example.com' }),
+      }),
+      {}
+    );
+    const invData = (await invRes.json()) as { invite_url: string };
+    const inviteToken = invData.invite_url.split('/invite/')[1];
+
+    await worker.fetch(
+      new Request(
+        `http://localhost/api/auth/google/start?invite=${inviteToken}&mock_email=user2@example.com&mock_sub=sub-user2`
+      ),
+      {}
+    );
+
+    const hijackRes = await worker.fetch(
+      new Request('http://localhost/api/auth/identities/link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'line',
+          provider_subject: 'line-sub-owner-001', // User 1 が使用中
+        }),
+      }),
+      {}
+    );
+    assert.equal(hijackRes.status, 409);
+    const hijackBody = (await hijackRes.json()) as { error: { code: string } };
+    assert.equal(hijackBody.error.code, 'STATE_CONFLICT');
+
+    // 5. User 1 に戻って複数連携がある状態で LINE を解除すると正常に解除できる
+    await worker.fetch(
+      new Request('http://localhost/api/auth/google/start?mock_email=owner@example.com&mock_sub=demo-google-sub-001'),
+      {}
+    );
+    const unlinkLineRes = await worker.fetch(
+      new Request('http://localhost/api/auth/identities/line', { method: 'DELETE' }),
+      {}
+    );
+    assert.equal(unlinkLineRes.status, 200);
+    const unlinkLineData = (await unlinkLineRes.json()) as {
+      unlinked: boolean;
+      linked_identities: Array<{ provider: string }>;
+    };
+    assert.equal(unlinkLineData.unlinked, true);
+    assert.equal(unlinkLineData.linked_identities.length, 2);
+  });
+
+  it('POST /api/auth/logout・POST /api/auth/logout-all・DELETE /api/auth/account が正常に動作する', async () => {
+    // 1. DELETE /api/auth/account (デモ初期ユーザー id=1 の場合は初期状態にリセット)
+    const resetRes = await worker.fetch(
+      new Request('http://localhost/api/auth/account', { method: 'DELETE' }),
+      {}
+    );
+    assert.equal(resetRes.status, 200);
+    const resetData = (await resetRes.json()) as { deleted: boolean; reset_demo: boolean };
+    assert.equal(resetData.deleted, true);
+    assert.equal(resetData.reset_demo, true);
+
+    // 2. POST /api/auth/logout でセッション失効 & Cookie 消去
+    const logoutRes = await worker.fetch(
+      new Request('http://localhost/api/auth/logout', { method: 'POST' }),
+      {}
+    );
+    assert.equal(logoutRes.status, 200);
+    const logoutCookie = logoutRes.headers.get('set-cookie') || '';
+    assert.ok(logoutCookie.includes('Max-Age=0'));
+    const logoutData = (await logoutRes.json()) as { logged_out: boolean };
+    assert.equal(logoutData.logged_out, true);
+
+    // ログアウト直後のセッション確認では authenticated: false になる
+    const afterLogoutRes = await worker.fetch(
+      new Request('http://localhost/api/auth/session'),
+      {}
+    );
+    const afterLogoutData = (await afterLogoutRes.json()) as AccountSummary;
+    assert.equal(afterLogoutData.authenticated, false);
+
+    // 3. 再ログイン後に POST /api/auth/logout-all も正常動作する
+    await worker.fetch(
+      new Request('http://localhost/api/auth/google/start?mock_email=owner@example.com'),
+      {}
+    );
+    const logoutAllRes = await worker.fetch(
+      new Request('http://localhost/api/auth/logout-all', { method: 'POST' }),
+      {}
+    );
+    assert.equal(logoutAllRes.status, 200);
+    const logoutAllData = (await logoutAllRes.json()) as { logged_out: boolean; scope: string };
+    assert.equal(logoutAllData.logged_out, true);
+    assert.equal(logoutAllData.scope, 'all');
+  });
+});

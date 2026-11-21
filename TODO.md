@@ -39,11 +39,12 @@
 - [ ] **日々の体調日記の編集（後から同日の記録を更新・採血項目を追記）導線の強化**
 
 ### Phase B：招待制ログイン・マルチユーザー分離・SNS後追い連携（詳細設計: [`docs/production-login.md`](docs/production-login.md)）
-- [ ] **`auth_identities` テーブルと所有者境界（`user_id`）のマイグレーション拡張**: 1人の内部 `users` に対して複数の外部認証（`google`, `apple`, `line`, `yahoo_japan`, `facebook`, `amazon`）を紐付けられる 1対多スキーマの適用
-- [ ] **初回 Owner ブートストラップ（`BOOTSTRAP_OWNER_EMAIL`）と Google OIDC ログイン（PKCE + D1 Session + CSRF）の実接続**
-- [ ] **招待リンク発行・受諾 UI/API（`/invite/:token`、Owner 専用、HMAC ハッシュ保存、1回限り）**
-- [ ] **各種 SNS アカウントの後追い連携 UI/API（`/api/auth/:provider/link`）**: ログイン済みユーザーが設定画面から LINE / Apple ID / Yahoo / Facebook / Amazon 等を追加連携・解除（最低1つは残すガード付き）できる機能
-- [ ] **アカウントと全記録の自己削除機能**
+- [x] **`auth_identities` テーブルと所有者境界（`user_id`）のマイグレーション拡張**: `0003_auth_identities_and_invites.sql`（`users.service_role`, `auth_identities`, `invitations` 拡張, `lab_records.user_id`）をローカル・本番 D1 ともに適用済み
+- [x] **初回 Owner ブートストラップ（`BOOTSTRAP_OWNER_EMAIL`）と Google OIDC ログイン（PKCE + D1 Session + CSRF）の実装（`worker/auth.ts`）**
+- [x] **招待リンク発行・受諾 UI/API（`/invite/:token`、Owner 専用、HMAC ハッシュ保存、1回限り）の実装**
+- [x] **各種 SNS アカウントの後追い連携 UI/API（`/api/auth/identities/link`）**: ログイン済みユーザーが設定画面から Google / LINE / Apple ID / Yahoo! JAPAN / Facebook / Amazon を追加連携・解除（最低1つは残すガード・別ユーザー紐付け済み乗っ取り拒否付き）できる機能
+- [x] **ログアウト（単一端末 / 全端末）およびアカウントと全記録の自己削除機能（`DELETE /api/auth/account`）**
+- [ ] **Human Gate（本番 OAuth Secret 登録）**: Owner が Google Cloud Console（および利用する SNS Developer Console）で OAuth クライアントを作成し、Cloudflare Worker Secrets（`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET`, `OAUTH_TRANSACTION_SECRET`, `BOOTSTRAP_OWNER_EMAIL`）を登録して `AUTH_MODE=production` へ切り替える作業
 
 ### Phase C / D：一般公開・外部認証拡張・有料プラン接続
 - [ ] **利用規約・プライバシーポリシー同意画面の本番有効化（`REGISTRATION_MODE=open` 対応）**
