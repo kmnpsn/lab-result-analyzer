@@ -1,18 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#0f766e" />
-      <stop offset="100%" stop-color="#0f172a" />
-    </linearGradient>
-    <linearGradient id="drop" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#fb7185" />
-      <stop offset="100%" stop-color="#e11d48" />
-    </linearGradient>
-  </defs>
-  <rect width="512" height="512" rx="112" fill="url(#bg)" />
-  <rect x="36" y="36" width="440" height="440" rx="88" fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="8" />
-  <!-- Blood drop -->
-  <path d="M256 88C256 88 140 218 140 306a116 116 0 0 0 232 0c0-88-116-218-116-218Z" fill="url(#drop)" stroke="#fff" stroke-width="12" stroke-linejoin="round" />
-  <!-- Pulse / chart line -->
-  <path d="M168 314h46l22-54 34 102 26-48h48" fill="none" stroke="#ffffff" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>お揃いテイスト クリップボード＆ハート 脚1/2</title>
+  <rect width="512" height="512" fill="#0f766e"/>
+  <g transform="translate(256 232) scale(0.88) translate(-256 -256)">
+    <!-- ボード本体 (クリーム色 #fff8e6 + 茶色枠 #6b4220) -->
+    <rect x="128" y="136" width="256" height="264" rx="26" fill="#fff8e6" stroke="#6b4220" stroke-width="28" stroke-linejoin="round"/>
+    <!-- 上部クリップ (茶色 #6b4220 + クリーム色の留め具) -->
+    <rect x="196" y="96" width="120" height="58" rx="18" fill="#6b4220"/>
+    <circle cx="256" cy="118" r="11" fill="#fff8e6"/>
+    <!-- 中央のハート (あたたかいコーラルレッド) -->
+    <path d="M256 340 C256 340 172 284 172 228 C172 198 196 178 222 178 C239 178 250 188 256 200 C262 188 273 178 290 178 C316 178 340 198 340 228 C340 284 256 340 256 340 Z" fill="#e15b64" stroke="#6b4220" stroke-width="14" stroke-linejoin="round"/>
+    <!-- ハート内の元気ライン -->
+    <path d="M204 248 H234 L246 222 L264 274 L276 248 H308" fill="none" stroke="#fff8e6" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <!-- 家計簿アイコンとお揃いの下部の横棒＋短い脚2本 -->
+  <g stroke="#6b4220" stroke-linecap="round">
+    <path d="M128.9 377.0H383.1" stroke-width="22"/>
+    <path d="M184.8 377.0V429.1M327.2 377.0V429.1" stroke-width="24"/>
+  </g>
 </svg>

@@ -13,7 +13,7 @@
             {{ retryingPause ? '確認しています...' : '🔄 開き直す' }}
           </button>
         </div>
-        <p class="pause-foot">からだノート — 安全のため自動で保護しています</p>
+        <p class="pause-foot">からだ手帳 — 安全のため自動で保護しています</p>
       </div>
     </div>
   } @else {
@@ -21,16 +21,16 @@
   <header class="top-header" [attr.data-tab]="activeTab">
     <div class="header-main">
       <div class="brand">
-        <div class="brand-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 2.5C12 2.5 6 9.5 6 14a6 6 0 0 0 12 0c0-4.5-6-11.5-6-11.5Z" />
-            <path d="M9.5 14.5h2l1-2.5 1.5 4 1-1.5h1.5" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-        </div>
+        <img
+          src="/icons/icon.svg"
+          alt=""
+          aria-hidden="true"
+          class="brand-logo-img"
+        />
         <div class="brand-text-wrap">
           <div class="brand-title-row">
-            <h1 class="desktop-title">からだノート <span class="title-sub">— 採血と体調のきろく</span></h1>
-            <h1 class="mobile-title">からだノート</h1>
+            <h1 class="desktop-title">からだ手帳 <span class="title-sub">— 採血と体調のきろく</span></h1>
+            <h1 class="mobile-title">からだ手帳</h1>
           </div>
           <div class="profile-summary">
             <span>{{ profile.name || 'ゲスト' }}</span>
@@ -1285,7 +1285,7 @@
               <ul>
                 <li>
                   <strong>医療行為・確定診断ではありません：</strong>
-                  からだノートは日々の体調と検査数値を振り返り、主治医への相談を助けるための記録ツールです。診断・治療・服薬変更は必ず医師にご相談ください。
+                  からだ手帳は日々の体調と検査数値を振り返り、主治医への相談を助けるための記録ツールです。診断・治療・服薬変更は必ず医師にご相談ください。
                 </li>
                 <li>
                   <strong>通信とデータの保護：</strong>
