@@ -65,8 +65,12 @@ try {
 
   fs.writeFileSync(tempConfigPath, effectiveConfig, { mode: 0o600 });
 
+  const isMigrationApply =
+    wranglerArgs[0] === 'd1' && wranglerArgs[1] === 'migrations' && wranglerArgs[2] === 'apply';
+
   const result = spawnSync('npx', ['wrangler', '--config', tempConfigPath, ...wranglerArgs], {
-    stdio: 'inherit',
+    stdio: isMigrationApply ? ['pipe', 'inherit', 'inherit'] : 'inherit',
+    input: isMigrationApply ? 'y\n' : undefined,
     env: mergedEnv,
   });
 
