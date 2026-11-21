@@ -11,11 +11,8 @@
         </div>
         <div class="brand-text-wrap">
           <div class="brand-title-row">
-            <h1 class="desktop-title">採血結果診断 &amp; 体調相関アナライザー</h1>
-            <h1 class="mobile-title">採血・体調管理</h1>
-            <span class="mode-pill" [class.offline]="api.isOffline">
-              {{ api.isOffline ? 'ローカル' : '同期中' }}
-            </span>
+            <h1 class="desktop-title">からだノート <span class="title-sub">— 採血と体調のきろく</span></h1>
+            <h1 class="mobile-title">からだノート</h1>
           </div>
           <div class="profile-summary">
             <span>{{ profile.name || 'ゲスト' }}</span>
@@ -30,7 +27,7 @@
         </div>
       </div>
 
-      <!-- スマホ用: ヘッダー右側の日付送りコントロール（家計簿アプリ流） -->
+      <!-- ヘッダー右側の日付送りコントロール（家計簿アプリ流） -->
       @if (records.length > 0) {
         <div class="mobile-date-stepper" aria-label="採血日の切り替え">
           <button
@@ -65,21 +62,6 @@
           </button>
         </div>
       }
-
-      <div class="provider-switcher" aria-label="AIプロバイダ切替">
-        <span class="switcher-label">AIプロバイダ:</span>
-        @for (p of providers; track p) {
-          <button
-            type="button"
-            class="provider-badge"
-            [class.active]="aiConfig.provider === p"
-            (click)="switchProviderQuick(p)"
-          >
-            <span class="provider-dot" [style.background]="providerMeta[p].color"></span>
-            {{ providerMeta[p].label }}
-          </button>
-        }
-      </div>
     </div>
 
     <nav class="tab-nav" role="tablist">
@@ -90,7 +72,7 @@
         [class.active]="activeTab === 'dashboard'"
         (click)="selectTab('dashboard')"
       >
-        📊 ダッシュボード &amp; 相関グラフ
+        📊 ホーム（推移と記録）
       </button>
       <button
         type="button"
@@ -99,7 +81,7 @@
         [class.active]="activeTab === 'register'"
         (click)="selectTab('register')"
       >
-        ➕ 採血結果の登録（OCR / 手入力）
+        ➕ 結果を記録する
       </button>
       <button
         type="button"
@@ -108,7 +90,7 @@
         [class.active]="activeTab === 'detail'"
         (click)="selectTab('detail')"
       >
-        🩺 採血詳細 &amp; AI 相関診断
+        🩺 くわしく見る
       </button>
       <button
         type="button"
@@ -117,7 +99,7 @@
         [class.active]="activeTab === 'settings'"
         (click)="selectTab('settings')"
       >
-        ⚙️ プロフィール・持病・AI設定
+        ⚙️ 設定
       </button>
     </nav>
   </header>
@@ -188,13 +170,13 @@
         <section class="panel">
           <div class="panel-header">
             <div>
-              <h2>採血値 × 体調10段階スコア 2軸相関チャート</h2>
+              <h2>検査の数値と体調のつながり</h2>
               <p class="panel-desc">
-                左軸に採血項目の推移と性別基準値帯（緑）、右軸（1〜10）に主観体調スコアと体重推移を重ねて可視化します。
+                検査の数値（青線・緑の帯が基準範囲）と、その日の体調スコア（1〜10）や体重を重ねて見られます。
               </p>
             </div>
             <div class="chart-select-wrap">
-              <label for="chartItemSelect">表示項目:</label>
+              <label for="chartItemSelect">項目:</label>
               <select id="chartItemSelect" [(ngModel)]="selectedChartCode">
                 @for (opt of availableChartCodes; track opt.code) {
                   <option [value]="opt.code">{{ opt.code }} - {{ opt.name }}</option>
@@ -217,7 +199,7 @@
           </div>
 
           <div class="overlay-toggles">
-            <span class="toggle-group-label">右軸オーバーレイ:</span>
+            <span class="toggle-group-label">一緒に表示:</span>
             @for (m of wellnessMetrics; track m.key) {
               <label class="checkbox-pill">
                 <input type="checkbox" [(ngModel)]="wellnessSelection[m.key]" />
@@ -428,15 +410,12 @@
             <!-- 相関インサイトカード -->
             <div class="insight-box">
               <div class="insight-head">
-                <span class="insight-title">🔎 相関インサイト（{{ chartModel.itemName }} × 体調スコア）</span>
+                <span class="insight-title">💡 {{ chartModel.itemName }} と体調の傾向</span>
                 <div class="insight-badges">
-                  <span class="insight-badge">
-                    相関係数 r = {{ correlationInsight.rOverall !== null ? correlationInsight.rOverall.toFixed(2) : '--' }}
-                  </span>
                   <span class="insight-badge accent">{{ correlationInsight.strengthLabel }}</span>
                   @if (chartModel.refLow !== null && chartModel.refHigh !== null) {
                     <span class="insight-badge normal">
-                      基準値({{ getSexLabel(profile.sex) }}): {{ chartModel.refLow }} 〜 {{ chartModel.refHigh }} {{ chartModel.unit }}
+                      基準の目安({{ getSexLabel(profile.sex) }}): {{ chartModel.refLow }} 〜 {{ chartModel.refHigh }} {{ chartModel.unit }}
                     </span>
                   }
                 </div>
@@ -450,8 +429,8 @@
         <section class="panel">
           <div class="panel-header">
             <div>
-              <h2>採血履歴タイムライン</h2>
-              <p class="panel-desc">各回の採血カードをクリックすると、基準値ゲージと AI 相関診断レポートを表示します。</p>
+              <h2>これまでの記録</h2>
+              <p class="panel-desc">記録をタップすると、くわしい結果とふりかえりメモを見られます。</p>
             </div>
           </div>
 
@@ -516,13 +495,13 @@
           <section class="panel">
             <div class="panel-header">
               <div>
-                <h2>ステップ A: 画像 / PDF AI読み取り・テキスト抽出</h2>
+                <h2>1. 検査結果の紙を読み取る（手入力だけでもOK）</h2>
                 <p class="panel-desc">
-                  採血結果用紙の写真・PDF をアップロードするか、テキストを貼り付けて自動抽出できます（抽出後に手入力修正可能）。
+                  結果の紙を撮影するか、画像・PDFを選ぶと数値を自動で読み取ります。あとから手で直せます。
                 </p>
               </div>
               <button type="button" class="btn-secondary" (click)="loadSampleToForm()">
-                ✨ サンプル結果を読み込む
+                ✨ お試しデータを入れる
               </button>
             </div>
 
@@ -550,14 +529,14 @@
                   (change)="onFileSelected($event)"
                 />
                 <div class="dropzone-icon">📄</div>
-                <p class="dropzone-title">結果用紙の写真または PDF を読み取る</p>
-                <p class="dropzone-sub">PNG / JPG / PDF 対応（{{ providerMeta[aiConfig.provider].label }} Vision OCR）</p>
+                <p class="dropzone-title">結果の紙を写真または PDF から読み取る</p>
+                <p class="dropzone-sub">スマホのカメラ撮影・写真・PDF に対応しています</p>
                 <div class="dropzone-btn-row">
                   <button type="button" class="btn-primary" [disabled]="ocrLoading" (click)="cameraInput.click()">
                     📷 カメラで撮影
                   </button>
                   <button type="button" class="btn-secondary" [disabled]="ocrLoading" (click)="fileInput.click()">
-                    {{ ocrLoading ? '読み取り中...' : '📁 ファイルを選択' }}
+                    {{ ocrLoading ? '読み取り中...' : '📁 写真・PDFを選ぶ' }}
                   </button>
                 </div>
                 @if (ocrFileName) {
@@ -569,16 +548,16 @@
               </div>
 
               <div class="text-ocr-box">
-                <label for="ocrTextArea">検査結果テキスト貼り付け（例: <code>Hb 11.2 g/dL</code>）</label>
+                <label for="ocrTextArea">メモや文字からまとめて読み取る（任意）</label>
                 <textarea
                   id="ocrTextArea"
-                  rows="7"
+                  rows="5"
                   [(ngModel)]="ocrRawText"
-                  placeholder="例:&#10;WBC 6200 /μL&#10;Hb 11.2 g/dL&#10;Ferritin 11 ng/mL&#10;CRP 0.35 mg/dL&#10;ALT 24 U/L"
+                  placeholder="例:&#10;Hb 11.2&#10;Ferritin 11&#10;CRP 0.35&#10;ALT 24"
                 ></textarea>
                 <div class="text-ocr-actions">
                   <button type="button" class="btn-secondary" [disabled]="ocrLoading" (click)="runTextOcr()">
-                    {{ ocrLoading ? '抽出中...' : 'テキストから自動抽出' }}
+                    {{ ocrLoading ? '読み取り中...' : '文字から項目を入れる' }}
                   </button>
                 </div>
               </div>
@@ -593,8 +572,8 @@
           <section class="panel">
             <div class="panel-header">
               <div>
-                <h2>ステップ B: 身体情報 &amp; 体調10段階スコアリング</h2>
-                <p class="panel-desc">採血当時の主観的な体調を 1〜10 で記録することで、採血値との個人内相関を分析します。</p>
+                <h2>2. その日の体調とメモ</h2>
+                <p class="panel-desc">検査を受けたころの体調を 1〜10 で残しておくと、数値とのつながりが分かります。</p>
               </div>
             </div>
 
@@ -680,9 +659,9 @@
           <section class="panel">
             <div class="panel-header">
               <div>
-                <h2>ステップ C: 採血項目の確認・手入力修正</h2>
+                <h2>3. 検査の数値</h2>
                 <p class="panel-desc">
-                  現在の性別（{{ getSexLabel(profile.sex) }}）の基準値に基づき、リアルタイムに L / N / H を判定します。
+                  基準の範囲と比べて「低め (L)」「基準内 (N)」「高め (H)」が自動で表示されます。
                 </p>
               </div>
             </div>
@@ -831,14 +810,14 @@
             </div>
 
             <div class="submit-bar">
-              <button type="button" class="btn-ghost" (click)="resetForm()">フォームをリセット</button>
+              <button type="button" class="btn-ghost" (click)="resetForm()">入力をやり直す</button>
               <button
                 type="button"
                 class="btn-primary large"
                 [disabled]="saving"
                 (click)="saveRecordAndAnalyze()"
               >
-                {{ saving ? '保存 & AI 相関診断を実行中...' : '💾 保存して AI 相関診断を実行' }}
+                {{ saving ? '保存しています...' : '💾 この内容で記録を保存する' }}
               </button>
             </div>
           </section>
@@ -848,12 +827,12 @@
       <!-- ===== タブ 3: 採血詳細 & AI 相関診断レポート ===== -->
       @if (activeTab === 'detail') {
         @if (!selectedRecord) {
-          <div class="panel empty-state">表示できる採血記録がありません。まずは採血結果を登録してください。</div>
+          <div class="panel empty-state">表示できる記録がありません。「記録」から採血結果を追加してください。</div>
         } @else {
           <section class="panel detail-header-panel">
             <div class="detail-selector-row">
               <div>
-                <h2>{{ selectedRecord.tested_at }} の採血詳細レポート</h2>
+                <h2>{{ selectedRecord.tested_at }} の結果</h2>
                 <p class="panel-desc">
                   {{ selectedRecord.facility_name }}
                   @if (selectedRecord.weight_kg !== null) {
@@ -862,7 +841,7 @@
                 </p>
               </div>
               <div class="record-picker">
-                <label for="recordPicker">表示する記録:</label>
+                <label for="recordPicker">記録を切り替え:</label>
                 <select id="recordPicker" [(ngModel)]="selectedRecordId">
                   @for (r of records; track r.id ?? r.tested_at) {
                     <option [ngValue]="r.id">{{ r.tested_at }} - {{ r.facility_name }} (体調 {{ r.overall_score }}/10)</option>
@@ -909,44 +888,37 @@
             }
           </section>
 
-          <!-- AI 相関診断カード -->
+          <!-- ふりかえり・相関カード（プロバイダ選択は一般ユーザーに見せない） -->
           <section class="panel ai-report-panel">
             <div class="panel-header">
               <div>
-                <h2>🤖 AI 相関診断レポート</h2>
-                <p class="panel-desc">
-                  使用モデル:
-                  <strong>{{ selectedRecord.ai_provider || aiConfig.provider }}</strong>
-                  / {{ selectedRecord.ai_model || aiConfig.model }}
-                </p>
+                <h2>💡 今回のふりかえりメモ</h2>
+                <p class="panel-desc">検査の数値と、あなたの体調・これまでの推移を合わせたまとめです。</p>
               </div>
               <div class="reanalyze-bar">
-                <span class="reanalyze-label">別プロバイダで再分析:</span>
-                @for (p of providers; track p) {
-                  <button
-                    type="button"
-                    class="btn-secondary small"
-                    [disabled]="analyzing"
-                    (click)="reanalyzeWith(p)"
-                  >
-                    {{ analyzing ? '分析中...' : providerMeta[p].label + ' で再分析' }}
-                  </button>
-                }
+                <button
+                  type="button"
+                  class="btn-secondary small"
+                  [disabled]="analyzing"
+                  (click)="reanalyzeWith(aiConfig.provider)"
+                >
+                  {{ analyzing ? '更新中...' : '🔄 コメントを更新' }}
+                </button>
               </div>
             </div>
 
             <div class="ai-cards-grid">
               <div class="ai-card summary">
-                <h3>① 基準値からの評価サマリー</h3>
-                <p>{{ selectedRecord.ai_summary || '診断サマリーが未生成です。上のボタンから分析を実行してください。' }}</p>
+                <h3>① 数値のまとめ</h3>
+                <p>{{ selectedRecord.ai_summary || 'まとめがまだありません。「コメントを更新」を押してください。' }}</p>
               </div>
               <div class="ai-card correlation">
-                <h3>② 体調10段階スコア・持病・過去推移との相関考察</h3>
-                <p>{{ selectedRecord.ai_correlation || '相関考察が未生成です。' }}</p>
+                <h3>② 体調やこれまでの推移とのつながり</h3>
+                <p>{{ selectedRecord.ai_correlation || '体調とのつながりを集計中です。' }}</p>
               </div>
               <div class="ai-card advice">
-                <h3>③ 主治医への相談ポイント・生活アドバイス</h3>
-                <p>{{ selectedRecord.ai_advice || 'アドバイスが未生成です。' }}</p>
+                <h3>③ 診察で聞いてみたいこと・暮らしのヒント</h3>
+                <p>{{ selectedRecord.ai_advice || 'ヒントを集計中です。' }}</p>
               </div>
             </div>
           </section>
@@ -955,8 +927,8 @@
           <section class="panel">
             <div class="panel-header">
               <div>
-                <h2>項目別 基準値レンジ・ビジュアルゲージ</h2>
-                <p class="panel-desc">緑帯が性別に応じた基準値範囲、丸マーカーが今回の測定値位置を示します。</p>
+                <h2>項目ごとのくわしい結果</h2>
+                <p class="panel-desc">緑色の帯が基準の目安、丸印が今回の数値です。</p>
               </div>
             </div>
 
@@ -1016,14 +988,14 @@
         }
       }
 
-      <!-- ===== タブ 4: プロフィール・持病・AI プロバイダ設定 ===== -->
+      <!-- ===== タブ 4: プロフィール・持病設定 ===== -->
       @if (activeTab === 'settings') {
         <div class="settings-grid">
           <section class="panel">
             <div class="panel-header">
               <div>
-                <h2>プロフィール・持病設定</h2>
-                <p class="panel-desc">性別を変更すると、採血項目の基準値マスタとグラフの基準値帯が連動します。</p>
+                <h2>あなたの基本情報・持病メモ</h2>
+                <p class="panel-desc">性別に合わせて、検査項目の基準範囲が自動で切り替わります。</p>
               </div>
             </div>
 
@@ -1037,7 +1009,7 @@
                 <input id="profAge" type="number" min="0" max="120" [(ngModel)]="profileForm.age" />
               </div>
               <div class="field">
-                <label for="profSex">性別（基準値マスタ連動）</label>
+                <label for="profSex">性別（基準の範囲に使用）</label>
                 <select id="profSex" [(ngModel)]="profileForm.sex">
                   <option value="female">女性</option>
                   <option value="male">男性</option>
@@ -1045,112 +1017,114 @@
                 </select>
               </div>
               <div class="field">
-                <label for="profHeight">身長 (cm) — 推定 BMI: {{ profileFormBmi }}</label>
+                <label for="profHeight">身長 (cm) — BMI: {{ profileFormBmi }}</label>
                 <input id="profHeight" type="number" step="0.5" [(ngModel)]="profileForm.height_cm" />
               </div>
             </div>
 
             <div class="field">
-              <label for="profConditions">持病・基礎疾患（カンマ区切り）</label>
+              <label for="profConditions">気になる症状・持病メモ（カンマ区切り）</label>
               <textarea
                 id="profConditions"
                 rows="2"
                 [(ngModel)]="profileForm.chronic_conditions"
-                placeholder="例: 鉄欠乏性貧血, 関節リウマチ, 脂質異常症"
+                placeholder="例: 貧血ぎみ, 疲れやすい, 肝臓の経過観察"
               ></textarea>
             </div>
 
             <div class="field">
-              <label for="profMeds">常用薬・サプリメントメモ</label>
+              <label for="profMeds">飲んでいるお薬・サプリメント</label>
               <textarea
                 id="profMeds"
                 rows="3"
                 [(ngModel)]="profileForm.medications"
-                placeholder="例: フェロミア 50mg（夕食後）, 葉酸"
+                placeholder="例: フェロミア 50mg（夕食後）, ビタミン剤"
               ></textarea>
             </div>
 
             <div class="form-actions">
               <button type="button" class="btn-primary" [disabled]="saving" (click)="saveProfile()">
-                {{ saving ? '保存中...' : 'プロフィールを保存' }}
+                {{ saving ? '保存中...' : '設定を保存する' }}
               </button>
             </div>
           </section>
 
-          <section class="panel">
-            <div class="panel-header">
-              <div>
-                <h2>AI プロバイダ &amp; API キー設定</h2>
-                <p class="panel-desc">
-                  Gemini / OpenAI / Claude を自由に切り替えられます。API キー未入力時でもサーバー設定またはローカル相関エンジンで動作します。
-                </p>
+          @if (isAdminMode) {
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2>🔧 管理者用: AI プロバイダ設定</h2>
+                  <p class="panel-desc">
+                    管理者モード（<code>?admin=1</code>）でのみ表示されています。一般ユーザーの画面には表示されません。
+                  </p>
+                </div>
               </div>
-            </div>
 
-            <div class="provider-cards">
-              @for (p of providers; track p) {
-                <button
-                  type="button"
-                  class="provider-card"
-                  [class.active]="aiConfig.provider === p"
-                  (click)="selectProvider(p)"
-                >
-                  <div class="provider-card-head">
-                    <span class="provider-dot" [style.background]="providerMeta[p].color"></span>
-                    <strong>{{ providerMeta[p].label }}</strong>
-                  </div>
-                  <p>{{ providerMeta[p].description }}</p>
-                </button>
-              }
-            </div>
-
-            <div class="field">
-              <label for="modelInput">使用モデル名（{{ providerMeta[aiConfig.provider].label }}）</label>
-              <input id="modelInput" type="text" [(ngModel)]="aiConfig.model" />
-              <div class="model-presets">
-                @for (m of providerMeta[aiConfig.provider].models; track m) {
+              <div class="provider-cards">
+                @for (p of providers; track p) {
                   <button
                     type="button"
-                    class="chip-btn small"
-                    [class.active]="aiConfig.model === m"
-                    (click)="selectModel(m)"
+                    class="provider-card"
+                    [class.active]="aiConfig.provider === p"
+                    (click)="selectProvider(p)"
                   >
-                    {{ m }}
+                    <div class="provider-card-head">
+                      <span class="provider-dot" [style.background]="providerMeta[p].color"></span>
+                      <strong>{{ providerMeta[p].label }}</strong>
+                    </div>
+                    <p>{{ providerMeta[p].description }}</p>
                   </button>
                 }
               </div>
-            </div>
 
-            <div class="field">
-              <label for="apiKeyInput">
-                {{ providerMeta[aiConfig.provider].label }} API キー（任意・ブラウザ localStorage にのみ保存）
-              </label>
-              <div class="apikey-row">
-                <input
-                  id="apiKeyInput"
-                  [type]="showApiKey ? 'text' : 'password'"
-                  [(ngModel)]="aiConfig.apiKeys[aiConfig.provider]"
-                  placeholder="未入力でもローカル分析・サーバーキーで動作します"
-                />
-                <button type="button" class="btn-ghost" (click)="showApiKey = !showApiKey">
-                  {{ showApiKey ? '隠す' : '表示' }}
-                </button>
-                <button type="button" class="icon-danger-btn" (click)="clearCurrentApiKey()">消去</button>
+              <div class="field">
+                <label for="modelInput">使用モデル名（{{ providerMeta[aiConfig.provider].label }}）</label>
+                <input id="modelInput" type="text" [(ngModel)]="aiConfig.model" />
+                <div class="model-presets">
+                  @for (m of providerMeta[aiConfig.provider].models; track m) {
+                    <button
+                      type="button"
+                      class="chip-btn small"
+                      [class.active]="aiConfig.model === m"
+                      (click)="selectModel(m)"
+                    >
+                      {{ m }}
+                    </button>
+                  }
+                </div>
               </div>
-            </div>
 
-            <div class="form-actions">
-              <button type="button" class="btn-primary" (click)="saveAiSettings()">AI 設定を保存</button>
-            </div>
-          </section>
+              <div class="field">
+                <label for="apiKeyInput">
+                  {{ providerMeta[aiConfig.provider].label }} API キー（管理者テスト用）
+                </label>
+                <div class="apikey-row">
+                  <input
+                    id="apiKeyInput"
+                    [type]="showApiKey ? 'text' : 'password'"
+                    [(ngModel)]="aiConfig.apiKeys[aiConfig.provider]"
+                    placeholder="サーバー側の環境変数を優先する場合は空欄"
+                  />
+                  <button type="button" class="btn-ghost" (click)="showApiKey = !showApiKey">
+                    {{ showApiKey ? '隠す' : '表示' }}
+                  </button>
+                  <button type="button" class="icon-danger-btn" (click)="clearCurrentApiKey()">消去</button>
+                </div>
+              </div>
+
+              <div class="form-actions">
+                <button type="button" class="btn-primary" (click)="saveAiSettings()">管理者設定を保存</button>
+              </div>
+            </section>
+          }
         </div>
 
         <!-- 基準値マスタ一覧 -->
         <section class="panel">
           <div class="panel-header">
             <div>
-              <h2>基準値マスタ（現在選択中の性別: {{ getSexLabel(profileForm.sex) }}）</h2>
-              <p class="panel-desc">プロフィール性別を切り替えると、以下の基準範囲がリアルタイムに確認できます。</p>
+              <h2>基準値の目安一覧（{{ getSexLabel(profileForm.sex) }}）</h2>
+              <p class="panel-desc">主な検査項目の一般的な基準範囲と、体調との関わりです。</p>
             </div>
           </div>
 
@@ -1245,7 +1219,7 @@
     >
       <span class="bottom-tab-indicator"></span>
       <span class="bottom-tab-icon" aria-hidden="true">🩺</span>
-      <span class="bottom-tab-label">診断</span>
+      <span class="bottom-tab-label">くわしく</span>
     </button>
     <button
       type="button"

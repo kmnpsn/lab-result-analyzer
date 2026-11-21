@@ -159,11 +159,16 @@ export class AppComponent implements OnInit {
   // タブ3: 詳細
   selectedRecordId: number | null = null;
 
-  // タブ4: 設定
+  // タブ4: 設定（AI設定は ?admin=1 の管理者モード時のみ表示）
   showApiKey = false;
+  isAdminMode = false;
 
   constructor(public api: ApiService) {
     this.aiConfig = this.api.loadAiConfig();
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      this.isAdminMode = params.get('admin') === '1';
+    }
   }
 
   async ngOnInit(): Promise<void> {
@@ -306,6 +311,12 @@ export class AppComponent implements OnInit {
 
   getAbnormalItems(record: LabRecord): LabItem[] {
     return record.items.filter((i) => i.flag === 'H' || i.flag === 'L');
+  }
+
+  getFlagLabel(flag: LabFlag): string {
+    if (flag === 'H') return '高め';
+    if (flag === 'L') return '低め';
+    return '基準内';
   }
 
   switchProviderQuick(provider: AiProviderName): void {
@@ -665,11 +676,11 @@ export class AppComponent implements OnInit {
         };
       });
       this.ocrStatusMessage =
-        res.note || `${this.formItems.length} 件の採血項目を読み取りました。下のテーブルで確認・修正してください。`;
-      this.showToast(`${this.formItems.length} 項目をフォームに反映しました`, 'success');
+        res.note || `${this.formItems.length} 件の項目を読み取りました。下の欄で数値を確認・修正できます。`;
+      this.showToast(`${this.formItems.length} 件の項目を読み取りました`, 'success');
     } else {
-      this.ocrStatusMessage = '項目を抽出できませんでした。形式を確認するか手入力で追加してください。';
-      this.showToast('採血項目を抽出できませんでした', 'error');
+      this.ocrStatusMessage = 'うまく読み取れませんでした。下の欄から直接入力してください。';
+      this.showToast('読み取れなかったため、手入力をご利用ください', 'error');
     }
   }
 
@@ -790,7 +801,7 @@ export class AppComponent implements OnInit {
       this.records = this.sortRecordsDesc([saved, ...this.records.filter((r) => r.id !== saved.id)]);
       this.selectedRecordId = saved.id ?? null;
       this.selectTab('detail');
-      this.showToast('採血記録を保存し、AI 相関診断レポートを作成しました', 'success');
+      this.showToast('記録を保存しました', 'success');
     } catch {
       this.showToast('保存できませんでした。入力内容は画面に残っていますので、もう一度「保存」をお試しください。', 'error');
     } finally {
@@ -888,9 +899,9 @@ export class AppComponent implements OnInit {
         }
       }
 
-      this.showToast(`${PROVIDER_META[provider].label} で再分析を完了しました`, 'success');
+      this.showToast('ふりかえりコメントを更新しました', 'success');
     } catch {
-      this.showToast('AI 再分析に失敗しました', 'error');
+      this.showToast('コメントの更新ができませんでした。少し時間をおいてもう一度お試しください。', 'error');
     } finally {
       this.analyzing = false;
     }
