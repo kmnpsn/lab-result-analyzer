@@ -383,7 +383,7 @@ function buildItemComment(
     if (item.item_code === 'Hb' || item.item_code === 'Ferritin' || item.item_code === 'RBC') {
       extra =
         record.fatigue_score <= 5
-          ? ` 倦怠感スコア(${record.fatigue_score}/10)の低下と整合する貧血・鉄欠乏所見です。`
+          ? ` 元気さスコア(${record.fatigue_score}/10)の低下と整合する貧血・鉄欠乏所見です。`
           : ' 貯蔵鉄・酸素運搬能の推移に注意してください。';
     } else if (item.item_code === 'eGFR') {
       extra = ' 腎機能濾過量の低下傾向があるため水分摂取や腎負担薬剤に注意が必要です。';
@@ -396,7 +396,7 @@ function buildItemComment(
     if (item.item_code === 'CRP' || item.item_code === 'WBC') {
       extra =
         record.pain_score <= 6 || record.overall_score <= 6
-          ? ` 痛みスコア(${record.pain_score}/10)・総合体調(${record.overall_score}/10)の低下と関連する炎症反応の可能性があります。`
+          ? ` からだの快適さ（不調のなさ）(${record.pain_score}/10)・全体の調子(${record.overall_score}/10)の低下と関連する炎症反応の可能性があります。`
           : ' 軽度の炎症反応がみられます。';
     } else if (item.item_code === 'ALT' || item.item_code === 'AST' || item.item_code === 'gGTP') {
       extra = ' 肝細胞や胆道系への負担が示唆されます。服薬・食事・休養との関連を確認してください。';
@@ -407,6 +407,119 @@ function buildItemComment(
   }
 
   return `基準範囲内です（${rangeStr}）${desc}。${deltaStr}`.trim();
+}
+
+function buildDailyOnlyAnalysis(
+  record: LabRecord,
+  chronological: LabRecord[],
+  profile?: UserProfile,
+  provider: AiProviderName = 'gemini',
+  model: string = 'gemini-2.5-flash'
+): AnalysisResponse {
+  const avgScore =
+    Math.round(
+      ((record.overall_score +
+        record.fatigue_score +
+        record.pain_score +
+        record.sleep_score +
+        record.appetite_score) /
+        5) *
+        10
+    ) / 10;
+
+  const summaryParts: string[] = [
+    `【日々の体調日記（${record.tested_at}）】全体の調子 ${record.overall_score}/10、元気さ ${record.fatigue_score}/10、からだの快適さ（不調のなさ） ${record.pain_score}/10、睡眠/休養 ${record.sleep_score}/10、食事/日常生活 ${record.appetite_score}/10（5軸平均 ${avgScore}/10）を記録しました。`,
+  ];
+
+  const lowAxes: string[] = [];
+  if (record.overall_score <= 5) lowAxes.push(`全体の調子(${record.overall_score}/10)`);
+  if (record.fatigue_score <= 5) lowAxes.push(`元気さ(${record.fatigue_score}/10)`);
+  if (record.pain_score <= 5) lowAxes.push(`からだの快適さ（不調のなさ）(${record.pain_score}/10)`);
+  if (record.sleep_score <= 5) lowAxes.push(`睡眠/休養(${record.sleep_score}/10)`);
+  if (record.appetite_score <= 5) lowAxes.push(`食事/日常生活(${record.appetite_score}/10)`);
+
+  if (lowAxes.length === 0) {
+    summaryParts.push(
+      '採血のない日も5軸すべて落ち着いたスコアで過ごせています。日々の小さな安定を記録しておくことで、次回検査時の大切な比較材料になります。'
+    );
+  } else {
+    summaryParts.push(
+      `本日は ${lowAxes.join('・')} がやや控えめなサインを出しています。無理をせず、からだが楽になるペースを優先してください。`
+    );
+  }
+
+  if (record.symptom_tags && record.symptom_tags.trim()) {
+    summaryParts.push(`気になる症状・出来事タグ（${record.symptom_tags.trim()}）もあわせて記録されています。`);
+  }
+
+  const bmi =
+    profile?.height_cm && record.weight_kg
+      ? Math.round((record.weight_kg / Math.pow(profile.height_cm / 100, 2)) * 10) / 10
+      : null;
+
+  const corrParts: string[] = [
+    `【体調5軸スコア・日々の振り返り】全体の調子 ${record.overall_score}/10、元気さ ${record.fatigue_score}/10、からだの快適さ（不調のなさ） ${record.pain_score}/10、睡眠/休養 ${record.sleep_score}/10、食事/日常生活 ${record.appetite_score}/10` +
+      (record.weight_kg ? `、体重 ${record.weight_kg}kg` : '') +
+      (bmi ? `（BMI ${bmi}）` : '') +
+      '。',
+  ];
+
+  if (profile?.chronic_conditions) {
+    corrParts.push(
+      `【持病・服薬との関連】基礎疾患「${profile.chronic_conditions}」${
+        profile.medications ? `（服薬: ${profile.medications}）` : ''
+      }の経過として、採血と採血の間の体調の波を残せています。`
+    );
+  }
+
+  const prevLabRecord = chronological
+    .filter((r) => r.tested_at <= record.tested_at && (r.items?.length ?? 0) > 0)
+    .at(-1);
+  if (prevLabRecord) {
+    const diffOverall = record.overall_score - prevLabRecord.overall_score;
+    const diffText =
+      diffOverall > 0 ? `+${diffOverall}ポイント上向き` : diffOverall < 0 ? `${diffOverall}ポイント変化` : '同じ水準を維持';
+    corrParts.push(
+      `直近の採血日（${prevLabRecord.tested_at}）と比べると、全体の調子は ${prevLabRecord.overall_score}/10 → ${record.overall_score}/10（${diffText}）で推移しています。`
+    );
+  }
+
+  if (record.condition_note && record.condition_note.trim().length > 0) {
+    corrParts.push(
+      `【ひとこと日記との照合】「${record.condition_note.trim()}」のメモは、次回診察時に主治医へ日々の暮らしぶりを伝える手がかりになります。`
+    );
+  }
+
+  const adviceParts: string[] = ['【主治医への確認ポイント】'];
+  if (record.symptom_tags && record.symptom_tags.trim()) {
+    adviceParts.push(
+      `・今回の体調日記で記録した「${record.symptom_tags.trim()}」がいつ頃からどのくらい続いているか、次回診察時にお伝えください。`
+    );
+  } else {
+    adviceParts.push(
+      '・採血のない日の体調スコアの推移を次回診察時に見せると、お薬や生活ペースが合っているか相談しやすくなります。'
+    );
+  }
+
+  adviceParts.push('【日常生活・セルフケアの工夫】');
+  if (lowAxes.length > 0) {
+    adviceParts.push(
+      '・少し疲れや違和感がある日は、消化にやさしい食事と早めの休養を心がけ、体調の変化をそのままノートに残しておきましょう。'
+    );
+  } else {
+    adviceParts.push(
+      '・穏やかな体調を維持できています。水分補給と心地よい睡眠リズムを続けながら、また気が向いた日に体調日記をつけてみてください。'
+    );
+  }
+
+  return {
+    ai_summary: summaryParts.join(' '),
+    ai_correlation: corrParts.join(' '),
+    ai_advice: adviceParts.join('\n'),
+    item_comments: {},
+    provider_used: provider,
+    model_used: model,
+  };
 }
 
 export function buildLocalAnalysis(
@@ -432,12 +545,20 @@ export function buildLocalAnalysis(
     a.tested_at.localeCompare(b.tested_at)
   );
 
-  // Find immediate previous record before current
-  const currentIndex = chronological.findIndex((r) => r.tested_at === record.tested_at && r.items === normalizedItems);
+  // 体調日記のみ（採血項目 0 件）の場合はやさしい振り返りコメントを生成
+  if (normalizedItems.length === 0) {
+    return buildDailyOnlyAnalysis(record, chronological, profile, provider, model);
+  }
+
+  // Find immediate previous lab record before current
+  const labChronological = chronological.filter((r) => (r.items?.length ?? 0) > 0);
+  const currentIndex = labChronological.findIndex(
+    (r) => r.tested_at === record.tested_at && r.items === normalizedItems
+  );
   const prevRecord =
     currentIndex > 0
-      ? chronological[currentIndex - 1]
-      : chronological.filter((r) => r.tested_at < record.tested_at).at(-1);
+      ? labChronological[currentIndex - 1]
+      : labChronological.filter((r) => r.tested_at < record.tested_at).at(-1);
 
   const highItems = normalizedItems.filter((i) => i.flag === 'H');
   const lowItems = normalizedItems.filter((i) => i.flag === 'L');
@@ -470,7 +591,7 @@ export function buildLocalAnalysis(
     }
   }
 
-  // 2. ai_correlation (subjective 10-scale wellness scores + weight + chronic conditions + longitudinal correlation)
+  // 2. ai_correlation (汎用5軸スコア: 全体の調子・元気さ・からだの快適さ（不調のなさ）・睡眠/休養・食事/日常生活)
   const corrParts: string[] = [];
   const bmi =
     profile?.height_cm && record.weight_kg
@@ -478,7 +599,7 @@ export function buildLocalAnalysis(
       : null;
 
   corrParts.push(
-    `【体調10段階スコア・身体状況】総合体調 ${record.overall_score}/10、倦怠感の少なさ(活力) ${record.fatigue_score}/10、睡眠の質 ${record.sleep_score}/10、痛みの少なさ ${record.pain_score}/10、食欲・胃腸 ${record.appetite_score}/10` +
+    `【体調10段階スコア・身体状況】全体の調子 ${record.overall_score}/10、元気さ ${record.fatigue_score}/10、からだの快適さ（不調のなさ） ${record.pain_score}/10、睡眠/休養 ${record.sleep_score}/10、食事/日常生活 ${record.appetite_score}/10` +
       (record.weight_kg ? `、体重 ${record.weight_kg}kg` : '') +
       (bmi ? `（BMI ${bmi}）` : '') +
       '。'
@@ -506,32 +627,32 @@ export function buildLocalAnalysis(
     const joined = [hbText, ferText].filter(Boolean).join('・');
     if ((hbItem?.flag === 'L' || ferItem?.flag === 'L') && record.fatigue_score <= 5) {
       crossInsights.push(
-        `貧血・貯蔵鉄指標（${joined}）の低下と、本人の強い倦怠感（活力スコア ${record.fatigue_score}/10・総合体調 ${record.overall_score}/10）が明確に一致しています`
+        `貧血・貯蔵鉄指標（${joined}）の低下と、本人のだるさ（元気さスコア ${record.fatigue_score}/10・全体の調子 ${record.overall_score}/10）が明確に一致しています`
       );
-    } else if (hbItem?.flag === 'N' && ( !ferItem || ferItem.flag === 'N') && record.fatigue_score >= 7) {
+    } else if (hbItem?.flag === 'N' && (!ferItem || ferItem.flag === 'N') && record.fatigue_score >= 7) {
       crossInsights.push(
-        `貧血・貯蔵鉄指標（${joined}）が基準範囲内に維持されており、活力スコア（${record.fatigue_score}/10）の良好さとよく相関しています`
+        `貧血・貯蔵鉄指標（${joined}）が基準範囲内に維持されており、元気さスコア（${record.fatigue_score}/10）の良好さとよく相関しています`
       );
     } else {
-      crossInsights.push(`酸素運搬・貯蔵鉄指標（${joined}）と活力スコア（${record.fatigue_score}/10）の推移を継続観察中です`);
+      crossInsights.push(`酸素運搬・貯蔵鉄指標（${joined}）と元気さスコア（${record.fatigue_score}/10）の推移を継続観察中です`);
     }
   }
 
   if (crpItem) {
     if (crpItem.flag === 'H' && (record.pain_score <= 6 || record.overall_score <= 6)) {
       crossInsights.push(
-        `炎症マーカー CRP(${crpItem.value}mg/dL: 高値)の上昇が、痛み・不快感スコア(${record.pain_score}/10)や総合体調(${record.overall_score}/10)の低下と連動しています`
+        `炎症マーカー CRP(${crpItem.value}mg/dL: 高値)の上昇が、からだの快適さ（不調のなさ）(${record.pain_score}/10)や全体の調子(${record.overall_score}/10)の低下と連動しています`
       );
     } else if (crpItem.flag === 'N' && record.pain_score >= 7) {
       crossInsights.push(
-        `CRP(${crpItem.value}mg/dL)が鎮静化しており、痛み・不快感の少なさ(${record.pain_score}/10)の安定を裏付けています`
+        `CRP(${crpItem.value}mg/dL)が鎮静化しており、からだの快適さ（不調のなさ）(${record.pain_score}/10)の安定を裏付けています`
       );
     }
   }
 
   if (altItem && altItem.flag === 'H') {
     crossInsights.push(
-      `肝機能 ALT(${altItem.value}U/L: 高値)が上昇しており、睡眠スコア(${record.sleep_score}/10)や服薬・疲労負荷との関連に留意が必要です`
+      `肝機能 ALT(${altItem.value}U/L: 高値)が上昇しており、睡眠/休養スコア(${record.sleep_score}/10)や食事/日常生活(${record.appetite_score}/10)・服薬との関連に留意が必要です`
     );
   }
 
@@ -544,12 +665,12 @@ export function buildLocalAnalysis(
   }
 
   // Longitudinal correlation across multiple records
-  if (chronological.length >= 2) {
+  if (labChronological.length >= 2) {
     const keyCodes = ['Hb', 'Ferritin', 'CRP', 'ALT', 'eGFR', 'HbA1c', 'TSH', 'WBC'];
     const longitudinalNotes: string[] = [];
 
     for (const code of keyCodes) {
-      const pairs = chronological
+      const pairs = labChronological
         .map((r) => {
           const found = (r.items || []).find((it) => it.item_code === code);
           return found ? { val: found.value, overall: r.overall_score, fatigue: r.fatigue_score, pain: r.pain_score, date: r.tested_at, unit: found.unit } : null;
@@ -567,12 +688,12 @@ export function buildLocalAnalysis(
 
         if (code === 'Hb' || code === 'Ferritin') {
           const rVal = rFatigue ?? rOverall;
-          const rText = rVal !== null ? `（活力スコアとの相関係数 r=${rVal}）` : '';
+          const rText = rVal !== null ? `（元気さスコアとの相関係数 r=${rVal}）` : '';
           longitudinalNotes.push(
-            `${code}: ${first.val}→${last.val}${last.unit}（同時期の総合体調 ${first.overall}→${last.overall}/10、活力 ${first.fatigue}→${last.fatigue}/10）${rText}`
+            `${code}: ${first.val}→${last.val}${last.unit}（同時期の全体の調子 ${first.overall}→${last.overall}/10、元気さ ${first.fatigue}→${last.fatigue}/10）${rText}`
           );
         } else if (code === 'CRP' || code === 'ALT') {
-          const rText = rOverall !== null ? `（総合体調との相関係数 r=${rOverall}）` : '';
+          const rText = rOverall !== null ? `（全体の調子との相関係数 r=${rOverall}）` : '';
           longitudinalNotes.push(
             `${code}: ${first.val}→${last.val}${last.unit}${rText}`
           );
@@ -582,9 +703,13 @@ export function buildLocalAnalysis(
 
     if (longitudinalNotes.length > 0) {
       corrParts.push(
-        `【過去${chronological.length}回の時系列相関分析】${longitudinalNotes.join(' / ')}。個人の採血データ推移と主観的な体調10段階スコアの間に明確な連動性が確認できます。`
+        `【過去${labChronological.length}回の時系列相関分析】${longitudinalNotes.join(' / ')}。個人の採血データ推移と主観的な体調10段階スコアの間に明確な連動性が確認できます。`
       );
     }
+  }
+
+  if (record.symptom_tags && record.symptom_tags.trim().length > 0) {
+    corrParts.push(`【症状・出来事タグ】「${record.symptom_tags.trim()}」が記録されています。`);
   }
 
   if (record.condition_note && record.condition_note.trim().length > 0) {
@@ -596,17 +721,17 @@ export function buildLocalAnalysis(
   adviceParts.push('【主治医への確認ポイント】');
   if (lowItems.some((i) => i.item_code === 'Hb' || i.item_code === 'Ferritin')) {
     adviceParts.push(
-      '・ヘモグロビンまたはフェリチン（貯蔵鉄）が基準値を下回っています。鉄剤補充の継続・用量調整と、倦怠感スコアの変化について主治医にご相談ください。'
+      '・ヘモグロビンまたはフェリチン（貯蔵鉄）が基準値を下回っています。鉄剤補充の継続・用量調整と、元気さスコアの変化について主治医にご相談ください。'
     );
   }
   if (highItems.some((i) => i.item_code === 'AST' || i.item_code === 'ALT' || i.item_code === 'gGTP')) {
     adviceParts.push(
-      '・肝機能酵素（AST/ALT/γ-GTP）に基準値超過がみられます。現在の内服薬やサプリメント、食事・体重変化との関連を主治医に確認してください。'
+      '・肝機能酵素（AST/ALT/γ-GTP）に基準値超過がみられます。現在の内服薬やサプリメント、食事/日常生活・体重変化との関連を主治医に確認してください。'
     );
   }
   if (highItems.some((i) => i.item_code === 'CRP' || i.item_code === 'WBC')) {
     adviceParts.push(
-      '・炎症指標（CRP/WBC）の上昇がみられます。関節痛・発熱・局所の違和感など自覚症状の推移を主治医にお伝えください。'
+      '・炎症指標（CRP/WBC）の上昇がみられます。からだの快適さ（不調のなさ）や発熱・局所の違和感など自覚症状の推移を主治医にお伝えください。'
     );
   }
   if (lowItems.length === 0 && highItems.length === 0) {
@@ -618,11 +743,11 @@ export function buildLocalAnalysis(
   adviceParts.push('【日常生活・セルフケアの工夫】');
   if (record.sleep_score <= 6 || record.fatigue_score <= 6) {
     adviceParts.push(
-      `・睡眠スコア(${record.sleep_score}/10)・活力スコア(${record.fatigue_score}/10)がやや低めのため、採血数値が改善途上にある期間は無理な運動を控え、睡眠時間の確保とヘム鉄・良質なタンパク質の摂取を心がけてください。`
+      `・睡眠/休養スコア(${record.sleep_score}/10)・元気さスコア(${record.fatigue_score}/10)がやや低めのため、採血数値が改善途上にある期間は無理な運動を控え、睡眠時間の確保とヘム鉄・良質なタンパク質の摂取を心がけてください。`
     );
   } else {
     adviceParts.push(
-      '・体調スコアも良好に推移しています。こまめな水分補給とバランスの良い食事・規則正しい睡眠リズムを維持し、次回採血時も同じ条件で体調10段階スコアを記録して比較できるようにしましょう。'
+      '・体調スコアも良好に推移しています。こまめな水分補給とバランスの良い食事・規則正しい睡眠リズムを維持し、採血のない日も体調日記をつけて変化を見守っていきましょう。'
     );
   }
 

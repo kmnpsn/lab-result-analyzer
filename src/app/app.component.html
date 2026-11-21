@@ -1,4 +1,22 @@
 <div class="app-shell" [attr.data-tab]="activeTab">
+  @if (isServicePaused) {
+    <div class="pause-gate" role="alert" aria-live="polite">
+      <div class="pause-card">
+        <div class="pause-icon" aria-hidden="true">🛡️</div>
+        <h1>ただいま一時的にご利用を止めています</h1>
+        <p class="pause-message">{{ servicePauseMessage }}</p>
+        @if (previewServicePause && !api.servicePaused) {
+          <p class="pause-preview-badge">※ テスト用プレビュー表示中です</p>
+        }
+        <div class="pause-actions">
+          <button type="button" class="btn-primary large" [disabled]="retryingPause" (click)="retryFromPause()">
+            {{ retryingPause ? '確認しています...' : '🔄 開き直す' }}
+          </button>
+        </div>
+        <p class="pause-foot">からだノート — 安全のため自動で保護しています</p>
+      </div>
+    </div>
+  } @else {
   <!-- ===== ヘッダーバー（スマホ時はタブ別の背景色に全体が切り替わる） ===== -->
   <header class="top-header" [attr.data-tab]="activeTab">
     <div class="header-main">
@@ -47,7 +65,9 @@
               [(ngModel)]="selectedRecordId"
             >
               @for (r of records; track r.id ?? r.tested_at) {
-                <option [ngValue]="r.id">{{ r.tested_at }} ({{ r.facility_name }})</option>
+                <option [ngValue]="r.id">
+                  {{ r.tested_at }} ({{ r.facility_name || (getRecordType(r) === 'daily' ? '体調日記' : '記録') }})
+                </option>
               }
             </select>
           </label>
@@ -118,19 +138,23 @@
       @if (activeTab === 'dashboard') {
         <section class="kpi-grid">
           <div class="kpi-card">
-            <div class="kpi-label">最新の採血日</div>
+            <div class="kpi-label">最新の記録日</div>
             <div class="kpi-value">{{ latestRecord?.tested_at || '未登録' }}</div>
             <div class="kpi-sub">
               @if (latestRecord) {
-                基準外項目: <strong>{{ getAbnormalItems(latestRecord).length }}件</strong> / 全{{ latestRecord.items.length }}項目
+                @if (getRecordType(latestRecord) === 'lab') {
+                  🧪 採血あり・基準外 <strong>{{ getAbnormalItems(latestRecord).length }}件</strong> / 全{{ latestRecord.items.length }}項目
+                } @else {
+                  📝 体調日記（採血なし）
+                }
               } @else {
-                採血結果を登録してください
+                体調日記や採血結果を記録してください
               }
             </div>
           </div>
 
           <div class="kpi-card">
-            <div class="kpi-label">最新の総合体調スコア</div>
+            <div class="kpi-label">最新の全体の調子</div>
             <div class="kpi-value">
               @if (latestRecord) {
                 <span class="score-pill large" [ngClass]="getScoreClass(latestRecord.overall_score)">
@@ -142,7 +166,7 @@
             </div>
             <div class="kpi-sub">
               @if (latestRecord) {
-                活力 {{ latestRecord.fatigue_score }} / 睡眠 {{ latestRecord.sleep_score }} / 痛み少 {{ latestRecord.pain_score }}
+                元気さ {{ latestRecord.fatigue_score }} / 不調なし {{ latestRecord.pain_score }} / 睡眠 {{ latestRecord.sleep_score }}
               }
             </div>
           </div>
@@ -156,11 +180,12 @@
           </div>
 
           <div class="kpi-card">
-            <div class="kpi-label">蓄積された採血履歴</div>
-            <div class="kpi-value">{{ records.length }} 回</div>
+            <div class="kpi-label">蓄積された記録</div>
+            <div class="kpi-value">{{ records.length }} 件</div>
             <div class="kpi-sub">
+              採血 {{ labRecordCount }} / 日記 {{ dailyRecordCount }} ・
               <button type="button" class="link-btn" (click)="selectTab('register')">
-                ＋ 新しい採血結果を登録
+                ＋ 記録する
               </button>
             </div>
           </div>
@@ -172,7 +197,7 @@
             <div>
               <h2>検査の数値と体調のつながり</h2>
               <p class="panel-desc">
-                検査の数値（青線・緑の帯が基準範囲）と、その日の体調スコア（1〜10）や体重を重ねて見られます。
+                検査の数値（青線・緑の帯が基準範囲）と、毎日の体調スコア（1〜10）や体重を重ねて見られます。
               </p>
             </div>
             <div class="chart-select-wrap">
@@ -337,8 +362,16 @@
                     stroke-dasharray="4 2"
                     opacity="0.9"
                   />
-                  @for (pt of series.points; track pt.date) {
-                    <circle [attr.cx]="pt.x" [attr.cy]="pt.y" r="3.6" [attr.fill]="series.color" />
+                  @for (pt of series.points; track pt.index) {
+                    <g
+                      class="chart-point-group"
+                      (mouseenter)="hoveredPointIndex = pt.index"
+                      (mouseleave)="hoveredPointIndex = null"
+                      (click)="openRecordDetail(pt.record)"
+                    >
+                      <circle [attr.cx]="pt.x" [attr.cy]="pt.y" r="10" fill="transparent" />
+                      <circle [attr.cx]="pt.x" [attr.cy]="pt.y" r="3.8" [attr.fill]="series.color" />
+                    </g>
                   }
                 }
 
@@ -383,8 +416,16 @@
               @if (hoveredRecord) {
                 <div class="chart-tooltip">
                   <div class="tooltip-head">
-                    <strong>{{ hoveredRecord.tested_at }}</strong>
-                    <span>{{ hoveredRecord.facility_name }}</span>
+                    <div class="tooltip-title-group">
+                      <strong>{{ hoveredRecord.tested_at }}</strong>
+                      <span
+                        class="record-type-badge"
+                        [ngClass]="getRecordType(hoveredRecord) === 'lab' ? 'type-lab' : 'type-daily'"
+                      >
+                        {{ getRecordType(hoveredRecord) === 'lab' ? '🧪 採血あり' : '📝 体調日記' }}
+                      </span>
+                    </div>
+                    <span>{{ hoveredRecord.facility_name || '毎日のきろく' }}</span>
                   </div>
                   <div class="tooltip-grid">
                     @if (getHoveredLabItem(); as hi) {
@@ -394,12 +435,20 @@
                         <span class="flag-badge" [ngClass]="'flag-' + hi.flag">{{ hi.flag }}</span>
                       </div>
                     }
-                    <div>総合体調: <strong>{{ hoveredRecord.overall_score }}/10</strong></div>
-                    <div>活力: <strong>{{ hoveredRecord.fatigue_score }}/10</strong></div>
+                    <div>全体: <strong>{{ hoveredRecord.overall_score }}/10</strong></div>
+                    <div>元気さ: <strong>{{ hoveredRecord.fatigue_score }}/10</strong></div>
+                    <div>不調なし: <strong>{{ hoveredRecord.pain_score }}/10</strong></div>
                     <div>睡眠: <strong>{{ hoveredRecord.sleep_score }}/10</strong></div>
-                    <div>痛み少: <strong>{{ hoveredRecord.pain_score }}/10</strong></div>
+                    <div>食事・生活: <strong>{{ hoveredRecord.appetite_score }}/10</strong></div>
                     <div>体重: <strong>{{ hoveredRecord.weight_kg ?? '--' }} kg</strong></div>
                   </div>
+                  @if (getRecordTags(hoveredRecord).length > 0) {
+                    <div class="symptom-tags-row compact">
+                      @for (tag of getRecordTags(hoveredRecord); track tag) {
+                        <span class="symptom-tag-chip">{{ tag }}</span>
+                      }
+                    </div>
+                  }
                   @if (hoveredRecord.condition_note) {
                     <div class="tooltip-note">{{ hoveredRecord.condition_note }}</div>
                   }
@@ -425,73 +474,148 @@
           }
         </section>
 
-        <!-- 採血履歴タイムライン一覧 -->
+        <!-- 採血・体調日記タイムライン一覧 -->
         <section class="panel">
           <div class="panel-header">
             <div>
               <h2>これまでの記録</h2>
               <p class="panel-desc">記録をタップすると、くわしい結果とふりかえりメモを見られます。</p>
             </div>
+            <div class="record-filter-pills" role="group" aria-label="記録の種類で絞り込み">
+              <button
+                type="button"
+                class="chip-btn"
+                [class.active]="recordFilter === 'all'"
+                (click)="recordFilter = 'all'"
+              >
+                すべて ({{ records.length }})
+              </button>
+              <button
+                type="button"
+                class="chip-btn"
+                [class.active]="recordFilter === 'lab'"
+                (click)="recordFilter = 'lab'"
+              >
+                🧪 採血あり ({{ labRecordCount }})
+              </button>
+              <button
+                type="button"
+                class="chip-btn"
+                [class.active]="recordFilter === 'daily'"
+                (click)="recordFilter = 'daily'"
+              >
+                📝 体調日記 ({{ dailyRecordCount }})
+              </button>
+            </div>
           </div>
 
-          <div class="timeline-list">
-            @for (rec of records; track rec.id ?? rec.tested_at) {
-              <article class="timeline-card" (click)="openRecordDetail(rec)">
-                <div class="timeline-top">
-                  <div class="timeline-meta">
-                    <span class="timeline-date">{{ rec.tested_at }}</span>
-                    <span class="timeline-facility">{{ rec.facility_name }}</span>
-                    @if (rec.weight_kg !== null) {
-                      <span class="meta-chip">⚖️ {{ rec.weight_kg }} kg</span>
-                    }
-                  </div>
-                  <div class="timeline-actions">
-                    <span class="score-pill" [ngClass]="getScoreClass(rec.overall_score)">
-                      総合体調 {{ rec.overall_score }}/10
-                    </span>
-                    <button
-                      type="button"
-                      class="icon-danger-btn"
-                      title="この記録を削除"
-                      (click)="deleteRecord(rec, $event)"
-                    >
-                      削除
-                    </button>
-                  </div>
-                </div>
-
-                <div class="mini-wellness-row">
-                  <span>活力 <strong>{{ rec.fatigue_score }}</strong></span>
-                  <span>睡眠 <strong>{{ rec.sleep_score }}</strong></span>
-                  <span>痛み少 <strong>{{ rec.pain_score }}</strong></span>
-                  <span>食欲 <strong>{{ rec.appetite_score }}</strong></span>
-                </div>
-
-                <div class="abnormal-tags">
-                  @if (getAbnormalItems(rec).length === 0) {
-                    <span class="flag-chip flag-N">全 {{ rec.items.length }} 項目 基準範囲内</span>
-                  } @else {
-                    @for (ab of getAbnormalItems(rec); track ab.item_code) {
-                      <span class="flag-chip" [ngClass]="'flag-' + ab.flag">
-                        {{ ab.item_code }} {{ ab.value }} {{ ab.unit }} ({{ ab.flag }})
+          @if (filteredRecords.length === 0) {
+            <div class="empty-state">該当する記録がまだありません。</div>
+          } @else {
+            <div class="timeline-list">
+              @for (rec of filteredRecords; track rec.id ?? rec.tested_at) {
+                <article class="timeline-card" (click)="openRecordDetail(rec)">
+                  <div class="timeline-top">
+                    <div class="timeline-meta">
+                      <span class="timeline-date">{{ rec.tested_at }}</span>
+                      <span
+                        class="record-type-badge"
+                        [ngClass]="getRecordType(rec) === 'lab' ? 'type-lab' : 'type-daily'"
+                      >
+                        {{ getRecordType(rec) === 'lab' ? '🧪 採血あり' : '📝 体調日記' }}
                       </span>
-                    }
-                  }
-                </div>
+                      @if (rec.facility_name) {
+                        <span class="timeline-facility">{{ rec.facility_name }}</span>
+                      }
+                      @if (rec.weight_kg !== null) {
+                        <span class="meta-chip">⚖️ {{ rec.weight_kg }} kg</span>
+                      }
+                    </div>
+                    <div class="timeline-actions">
+                      <span class="score-pill" [ngClass]="getScoreClass(rec.overall_score)">
+                        全体 {{ rec.overall_score }}/10
+                      </span>
+                      <button
+                        type="button"
+                        class="icon-danger-btn"
+                        title="この記録を削除"
+                        (click)="deleteRecord(rec, $event)"
+                      >
+                        削除
+                      </button>
+                    </div>
+                  </div>
 
-                @if (rec.condition_note) {
-                  <p class="timeline-note">📝 {{ rec.condition_note }}</p>
-                }
-              </article>
-            }
-          </div>
+                  <div class="mini-wellness-row">
+                    <span>元気さ <strong>{{ rec.fatigue_score }}</strong></span>
+                    <span>不調なし <strong>{{ rec.pain_score }}</strong></span>
+                    <span>睡眠 <strong>{{ rec.sleep_score }}</strong></span>
+                    <span>食事・生活 <strong>{{ rec.appetite_score }}</strong></span>
+                  </div>
+
+                  @if (getRecordTags(rec).length > 0) {
+                    <div class="symptom-tags-row">
+                      @for (tag of getRecordTags(rec); track tag) {
+                        <span class="symptom-tag-chip">{{ tag }}</span>
+                      }
+                    </div>
+                  }
+
+                  @if (getRecordType(rec) === 'lab') {
+                    <div class="abnormal-tags">
+                      @if (getAbnormalItems(rec).length === 0) {
+                        <span class="flag-chip flag-N">全 {{ rec.items.length }} 項目 基準範囲内</span>
+                      } @else {
+                        @for (ab of getAbnormalItems(rec); track ab.item_code) {
+                          <span class="flag-chip" [ngClass]="'flag-' + ab.flag">
+                            {{ ab.item_code }} {{ ab.value }} {{ ab.unit }} ({{ ab.flag }})
+                          </span>
+                        }
+                      }
+                    </div>
+                  }
+
+                  @if (rec.condition_note) {
+                    <p class="timeline-note">📝 {{ rec.condition_note }}</p>
+                  }
+                </article>
+              }
+            </div>
+          }
         </section>
       }
 
-      <!-- ===== タブ 2: 採血結果の登録 ===== -->
+      <!-- ===== タブ 2: 記録する（2モード: 毎日の体調日記 / 採血結果＋体調） ===== -->
       @if (activeTab === 'register') {
         <div class="register-stack">
-          <!-- ステップ A: OCR / テキスト / サンプル -->
+          <!-- モード切替ピル -->
+          <section class="panel mode-switch-panel">
+            <div class="mode-switch-pills" role="tablist" aria-label="記録の種類を選択">
+              <button
+                type="button"
+                role="tab"
+                class="mode-switch-btn"
+                [class.active]="formRecordType === 'daily'"
+                (click)="setFormRecordType('daily')"
+              >
+                <span class="mode-btn-title">📝 今日の体調日記だけつける</span>
+                <span class="mode-btn-sub">毎日のきろく（採血なしですぐ保存）</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                class="mode-switch-btn"
+                [class.active]="formRecordType === 'lab'"
+                (click)="setFormRecordType('lab')"
+              >
+                <span class="mode-btn-title">🧪 採血結果も一緒に記録する</span>
+                <span class="mode-btn-sub">検査した日（紙の読み取り・数値入力）</span>
+              </button>
+            </div>
+          </section>
+
+          <!-- ステップ A: OCR / テキスト / サンプル（採血ありモードのみ） -->
+          @if (formRecordType === 'lab') {
           <section class="panel">
             <div class="panel-header">
               <div>
@@ -567,32 +691,41 @@
               <div class="ocr-status">{{ ocrStatusMessage }}</div>
             }
           </section>
+          }
 
-          <!-- ステップ B: 身体情報 & 体調10段階スコアリング -->
+          <!-- ステップ B: 身体情報 & 汎用5軸スコア & 症状タグ -->
           <section class="panel">
             <div class="panel-header">
               <div>
-                <h2>2. その日の体調とメモ</h2>
-                <p class="panel-desc">検査を受けたころの体調を 1〜10 で残しておくと、数値とのつながりが分かります。</p>
+                <h2>{{ formRecordType === 'daily' ? '1. 今日の体調とメモ' : '2. その日の体調とメモ' }}</h2>
+                <p class="panel-desc">
+                  {{
+                    formRecordType === 'daily'
+                      ? '毎日の体調を 1〜10 と症状タグで残しておくと、採血結果とのつながりが見えてきます。'
+                      : '検査を受けたころの体調を 1〜10 で残しておくと、数値とのつながりが分かります。'
+                  }}
+                </p>
               </div>
             </div>
 
-            <div class="form-row-3">
+            <div [class]="formRecordType === 'daily' ? 'form-grid-2' : 'form-row-3'">
               <div class="field">
-                <label for="testedAt">採血日 *</label>
+                <label for="testedAt">{{ formRecordType === 'daily' ? '記録日 *' : '採血日 *' }}</label>
                 <input id="testedAt" type="date" [(ngModel)]="formTestedAt" />
               </div>
+              @if (formRecordType === 'lab') {
+                <div class="field">
+                  <label for="facilityName">医療機関名</label>
+                  <input
+                    id="facilityName"
+                    type="text"
+                    [(ngModel)]="formFacilityName"
+                    placeholder="例: さくら内科クリニック"
+                  />
+                </div>
+              }
               <div class="field">
-                <label for="facilityName">医療機関名</label>
-                <input
-                  id="facilityName"
-                  type="text"
-                  [(ngModel)]="formFacilityName"
-                  placeholder="例: さくら内科クリニック"
-                />
-              </div>
-              <div class="field">
-                <label for="weightKg">当時の体重 (kg)</label>
+                <label for="weightKg">{{ formRecordType === 'daily' ? '今日の体重 (kg)' : '当時の体重 (kg)' }}</label>
                 <input id="weightKg" type="number" step="0.1" [(ngModel)]="formWeightKg" placeholder="例: 54.2" />
               </div>
             </div>
@@ -600,62 +733,93 @@
             <div class="sliders-grid">
               <div class="slider-card">
                 <div class="slider-top">
-                  <label for="sOverall">1. 総合体調</label>
+                  <label for="sOverall">1. 全体の調子</label>
                   <span class="score-pill" [ngClass]="getScoreClass(formOverall)">{{ formOverall }} / 10</span>
                 </div>
                 <input id="sOverall" type="range" min="1" max="10" step="1" [(ngModel)]="formOverall" />
-                <div class="slider-scale"><span>1: 最悪</span><span>10: 絶好調</span></div>
+                <div class="slider-scale"><span>1: とてもつらい</span><span>10: とても良い</span></div>
               </div>
 
               <div class="slider-card">
                 <div class="slider-top">
-                  <label for="sFatigue">2. 倦怠感の少なさ・活力</label>
+                  <label for="sFatigue">2. 元気さ・だるさのなさ</label>
                   <span class="score-pill" [ngClass]="getScoreClass(formFatigue)">{{ formFatigue }} / 10</span>
                 </div>
                 <input id="sFatigue" type="range" min="1" max="10" step="1" [(ngModel)]="formFatigue" />
-                <div class="slider-scale"><span>1: 強い倦怠感</span><span>10: 活力十分</span></div>
+                <div class="slider-scale"><span>1: 強いだるさ</span><span>10: すっきり元気</span></div>
               </div>
 
               <div class="slider-card">
                 <div class="slider-top">
-                  <label for="sSleep">3. 睡眠の質</label>
-                  <span class="score-pill" [ngClass]="getScoreClass(formSleep)">{{ formSleep }} / 10</span>
-                </div>
-                <input id="sSleep" type="range" min="1" max="10" step="1" [(ngModel)]="formSleep" />
-                <div class="slider-scale"><span>1: 不眠・浅い</span><span>10: 熟睡</span></div>
-              </div>
-
-              <div class="slider-card">
-                <div class="slider-top">
-                  <label for="sPain">4. 痛み・不快感の少なさ</label>
+                  <label for="sPain">3. からだの快適さ（不調のなさ）</label>
                   <span class="score-pill" [ngClass]="getScoreClass(formPain)">{{ formPain }} / 10</span>
                 </div>
                 <input id="sPain" type="range" min="1" max="10" step="1" [(ngModel)]="formPain" />
-                <div class="slider-scale"><span>1: 強い痛み</span><span>10: 痛みなし</span></div>
+                <div class="slider-scale"><span>1: 不調・違和感が強い</span><span>10: 気にならない</span></div>
               </div>
 
               <div class="slider-card">
                 <div class="slider-top">
-                  <label for="sAppetite">5. 食欲・胃腸の調子</label>
+                  <label for="sSleep">4. 睡眠・休養</label>
+                  <span class="score-pill" [ngClass]="getScoreClass(formSleep)">{{ formSleep }} / 10</span>
+                </div>
+                <input id="sSleep" type="range" min="1" max="10" step="1" [(ngModel)]="formSleep" />
+                <div class="slider-scale"><span>1: 眠れない・浅い</span><span>10: ぐっすり休めた</span></div>
+              </div>
+
+              <div class="slider-card">
+                <div class="slider-top">
+                  <label for="sAppetite">5. 食事・日常生活のしやすさ</label>
                   <span class="score-pill" [ngClass]="getScoreClass(formAppetite)">{{ formAppetite }} / 10</span>
                 </div>
                 <input id="sAppetite" type="range" min="1" max="10" step="1" [(ngModel)]="formAppetite" />
-                <div class="slider-scale"><span>1: 不振</span><span>10: 良好</span></div>
+                <div class="slider-scale"><span>1: ほとんど無理</span><span>10: 普段どおり</span></div>
+              </div>
+            </div>
+
+            <div class="field symptom-tags-field">
+              <label>気になる症状・できごとタグ（タップで複数選択）</label>
+              <div class="symptom-toggle-grid">
+                @for (tag of symptomTagPresets; track tag) {
+                  <button
+                    type="button"
+                    class="symptom-toggle-btn"
+                    [class.active]="hasSymptomTag(tag)"
+                    (click)="toggleSymptomTag(tag)"
+                  >
+                    {{ hasSymptomTag(tag) ? '✓ ' : '' }}{{ tag }}
+                  </button>
+                }
               </div>
             </div>
 
             <div class="field note-field">
-              <label for="conditionNote">当時の症状・服薬変更・生活メモ</label>
+              <label for="conditionNote">ひとこと日記・症状・服薬変更メモ</label>
               <textarea
                 id="conditionNote"
                 rows="3"
                 [(ngModel)]="formConditionNote"
-                placeholder="例: 朝のこわばりあり。鉄剤を夕食後から隔日服用に変更。睡眠時間6時間。"
+                placeholder="例: 朝のこわばりあり。お薬を隔日服用に変更。睡眠時間6時間。"
               ></textarea>
             </div>
+
+            @if (formRecordType === 'daily') {
+              <div class="submit-bar">
+                <button type="button" class="btn-ghost" (click)="resetForm()">入力をやり直す</button>
+                <button
+                  type="button"
+                  class="btn-primary large"
+                  [disabled]="saving"
+                  (click)="saveRecordAndAnalyze()"
+                >
+                  {{ saving ? '保存しています...' : '💾 今日の体調日記を保存する' }}
+                </button>
+              </div>
+            }
           </section>
 
-          <!-- ステップ C: 採血項目の確認・手入力修正テーブル -->
+          <!-- ステップ C: 採血項目の確認・手入力修正テーブル（採血ありモードのみ） -->
+          @if (formRecordType === 'lab') {
           <section class="panel">
             <div class="panel-header">
               <div>
@@ -817,24 +981,33 @@
                 [disabled]="saving"
                 (click)="saveRecordAndAnalyze()"
               >
-                {{ saving ? '保存しています...' : '💾 この内容で記録を保存する' }}
+                {{ saving ? '保存しています...' : '💾 採血結果と体調を保存する' }}
               </button>
             </div>
           </section>
+          }
         </div>
       }
 
-      <!-- ===== タブ 3: 採血詳細 & AI 相関診断レポート ===== -->
+      <!-- ===== タブ 3: 詳細 & ふりかえり ===== -->
       @if (activeTab === 'detail') {
         @if (!selectedRecord) {
-          <div class="panel empty-state">表示できる記録がありません。「記録」から採血結果を追加してください。</div>
+          <div class="panel empty-state">表示できる記録がありません。「記録」から体調日記や採血結果を追加してください。</div>
         } @else {
           <section class="panel detail-header-panel">
             <div class="detail-selector-row">
               <div>
-                <h2>{{ selectedRecord.tested_at }} の結果</h2>
+                <div class="detail-title-row">
+                  <h2>{{ selectedRecord.tested_at }} の記録</h2>
+                  <span
+                    class="record-type-badge"
+                    [ngClass]="getRecordType(selectedRecord) === 'lab' ? 'type-lab' : 'type-daily'"
+                  >
+                    {{ getRecordType(selectedRecord) === 'lab' ? '🧪 採血あり' : '📝 体調日記' }}
+                  </span>
+                </div>
                 <p class="panel-desc">
-                  {{ selectedRecord.facility_name }}
+                  {{ selectedRecord.facility_name || '毎日のきろく' }}
                   @if (selectedRecord.weight_kg !== null) {
                     / 体重 {{ selectedRecord.weight_kg }} kg
                   }
@@ -844,7 +1017,9 @@
                 <label for="recordPicker">記録を切り替え:</label>
                 <select id="recordPicker" [(ngModel)]="selectedRecordId">
                   @for (r of records; track r.id ?? r.tested_at) {
-                    <option [ngValue]="r.id">{{ r.tested_at }} - {{ r.facility_name }} (体調 {{ r.overall_score }}/10)</option>
+                    <option [ngValue]="r.id">
+                      {{ r.tested_at }} - {{ r.facility_name || (getRecordType(r) === 'daily' ? '体調日記' : '記録') }} (全体 {{ r.overall_score }}/10)
+                    </option>
                   }
                 </select>
               </div>
@@ -852,39 +1027,47 @@
 
             <div class="detail-wellness-grid">
               <div class="wellness-chip-card">
-                <span class="w-label">総合体調</span>
+                <span class="w-label">全体の調子</span>
                 <span class="score-pill" [ngClass]="getScoreClass(selectedRecord.overall_score)">
                   {{ selectedRecord.overall_score }} / 10
                 </span>
               </div>
               <div class="wellness-chip-card">
-                <span class="w-label">倦怠感の少なさ・活力</span>
+                <span class="w-label">元気さ・だるさのなさ</span>
                 <span class="score-pill" [ngClass]="getScoreClass(selectedRecord.fatigue_score)">
                   {{ selectedRecord.fatigue_score }} / 10
                 </span>
               </div>
               <div class="wellness-chip-card">
-                <span class="w-label">睡眠の質</span>
-                <span class="score-pill" [ngClass]="getScoreClass(selectedRecord.sleep_score)">
-                  {{ selectedRecord.sleep_score }} / 10
-                </span>
-              </div>
-              <div class="wellness-chip-card">
-                <span class="w-label">痛みの少なさ</span>
+                <span class="w-label">からだの快適さ（不調のなさ）</span>
                 <span class="score-pill" [ngClass]="getScoreClass(selectedRecord.pain_score)">
                   {{ selectedRecord.pain_score }} / 10
                 </span>
               </div>
               <div class="wellness-chip-card">
-                <span class="w-label">食欲・胃腸</span>
+                <span class="w-label">睡眠・休養</span>
+                <span class="score-pill" [ngClass]="getScoreClass(selectedRecord.sleep_score)">
+                  {{ selectedRecord.sleep_score }} / 10
+                </span>
+              </div>
+              <div class="wellness-chip-card">
+                <span class="w-label">食事・日常生活のしやすさ</span>
                 <span class="score-pill" [ngClass]="getScoreClass(selectedRecord.appetite_score)">
                   {{ selectedRecord.appetite_score }} / 10
                 </span>
               </div>
             </div>
 
+            @if (getRecordTags(selectedRecord).length > 0) {
+              <div class="symptom-tags-row detail-tags">
+                @for (tag of getRecordTags(selectedRecord); track tag) {
+                  <span class="symptom-tag-chip">{{ tag }}</span>
+                }
+              </div>
+            }
+
             @if (selectedRecord.condition_note) {
-              <div class="detail-note">📝 当時のメモ: {{ selectedRecord.condition_note }}</div>
+              <div class="detail-note">📝 ひとこと日記: {{ selectedRecord.condition_note }}</div>
             }
           </section>
 
@@ -909,7 +1092,7 @@
 
             <div class="ai-cards-grid">
               <div class="ai-card summary">
-                <h3>① 数値のまとめ</h3>
+                <h3>{{ getRecordType(selectedRecord) === 'lab' ? '① 数値のまとめ' : '① 今日の体調まとめ' }}</h3>
                 <p>{{ selectedRecord.ai_summary || 'まとめがまだありません。「コメントを更新」を押してください。' }}</p>
               </div>
               <div class="ai-card correlation">
@@ -923,7 +1106,8 @@
             </div>
           </section>
 
-          <!-- カテゴリ別ビジュアルゲージバー一覧 -->
+          <!-- カテゴリ別ビジュアルゲージバー一覧（採血ありレコードのみ） -->
+          @if (selectedRecord.items.length > 0) {
           <section class="panel">
             <div class="panel-header">
               <div>
@@ -985,6 +1169,11 @@
               </div>
             }
           </section>
+          } @else {
+            <section class="panel empty-state daily-only-notice">
+              📝 この日は体調日記のみの記録です（採血項目の入力はありません）。
+            </section>
+          }
         }
       }
 
@@ -1046,6 +1235,72 @@
               <button type="button" class="btn-primary" [disabled]="saving" (click)="saveProfile()">
                 {{ saving ? '保存中...' : '設定を保存する' }}
               </button>
+            </div>
+          </section>
+
+          <!-- 一般公開・課金・データ保護の枠 -->
+          <section class="panel account-plan-panel">
+            <div class="panel-header">
+              <div>
+                <h2>👤 アカウント・ご利用プラン（公開準備枠）</h2>
+                <p class="panel-desc">現在の利用モード、データ書き出し、プライバシー保護方針を確認できます。</p>
+              </div>
+            </div>
+
+            <div class="account-status-grid">
+              <div class="account-stat-box">
+                <span class="account-stat-label">現在の利用モード</span>
+                <strong class="account-stat-val">{{ getRegistrationModeLabel() }}</strong>
+              </div>
+              <div class="account-stat-box">
+                <span class="account-stat-label">ご利用プラン</span>
+                <div class="plan-badge-row">
+                  <span class="plan-tier-badge">{{ getPlanTierLabel() }}</span>
+                  <span class="plan-quota-text">
+                    今月の紙読み取り: {{ account.monthly_ocr_used }} / {{ account.monthly_ocr_limit }} 回
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div class="plan-upgrade-note">
+              <strong>✨ プレミアム枠（プラス / プロ・準備中）</strong>
+              <p>
+                無料プランでは毎日の体調日記・採血の手入力・推移グラフ・CSV書き出しをそのままご利用いただけます。
+                今後の一般公開に向けて、紙の自動読み取り回数拡張や長期まとめレポートに対応するプレミアム枠を準備中です。
+              </p>
+            </div>
+
+            <div class="export-block">
+              <button type="button" class="btn-primary export-csv-btn" (click)="exportRecordsCsv()">
+                📥 記録を CSV で書き出す（Excel対応 UTF-8 BOM付き）
+              </button>
+              <p class="export-help">
+                全 {{ records.length }} 件の体調スコア・症状タグ・メモ・主要採血項目を端末に保存できます。診察時の持参やバックアップにご活用ください。
+              </p>
+            </div>
+
+            <div class="policy-box">
+              <h3>🛡️ 利用規約・プライバシー保護方針</h3>
+              <ul>
+                <li>
+                  <strong>医療行為・確定診断ではありません：</strong>
+                  からだノートは日々の体調と検査数値を振り返り、主治医への相談を助けるための記録ツールです。診断・治療・服薬変更は必ず医師にご相談ください。
+                </li>
+                <li>
+                  <strong>通信とデータの保護：</strong>
+                  記録データはすべて暗号化通信（HTTPS/TLS）で送受信され、所有者境界（アカウント単位の分離）とセキュリティヘッダーで保護されます。
+                </li>
+                <li>
+                  <strong>高負荷・障害時の自動保護：</strong>
+                  アクセス集中や点検時には自動で一時停止画面へ切り替え、誤保存やデータ破損を防ぎます。
+                </li>
+              </ul>
+              <div class="policy-preview-row">
+                <button type="button" class="btn-ghost small-btn" (click)="toggleServicePausePreview()">
+                  🛡️ 一時停止画面をプレビュー
+                </button>
+              </div>
             </div>
           </section>
 
@@ -1233,4 +1488,5 @@
       <span class="bottom-tab-label">設定</span>
     </button>
   </nav>
+  }
 </div>

@@ -1,5 +1,6 @@
 import { Injectable } from '@angular/core';
 import {
+  AccountSummary,
   AiProviderName,
   BiologicalSex,
   LabItem,
@@ -11,6 +12,11 @@ import {
   lookupStandard,
 } from '../shared/types';
 import {
+  AppErrorCode,
+  friendlyErrorMessage,
+  isServerErrorCode,
+} from '../shared/error-codes';
+import {
   PROVIDER_META,
   createFallbackProfile,
   createFallbackRecords,
@@ -19,11 +25,26 @@ import {
   parseLabTextLocally,
 } from './fallback-engine';
 
+export type ErrorContext = 'read' | 'write' | 'delete' | 'ocr';
+
+export class ApiError extends Error {
+  constructor(
+    public readonly code: AppErrorCode,
+    public readonly status: number,
+    public readonly friendlyMessage: string,
+    public readonly requestId?: string
+  ) {
+    super(friendlyMessage);
+    this.name = 'ApiError';
+  }
+}
+
 export interface BootstrapResponse {
   profile: UserProfile;
   records: LabRecord[];
   standards: ReferenceStandard[];
   providers: AiProviderName[];
+  account?: AccountSummary;
 }
 
 export interface AiClientConfig {
@@ -48,12 +69,41 @@ export interface AnalyzeResponse {
   model_used?: string;
 }
 
-const STORAGE_STATE_KEY = 'lab_analyzer_offline_state_v1';
+const STORAGE_STATE_KEY = 'lab_analyzer_offline_state_v2';
 const STORAGE_AI_KEY = 'lab_analyzer_ai_config_v1';
+
+export function createDefaultAccountSummary(): AccountSummary {
+  return {
+    registration_mode: 'demo',
+    authenticated: false,
+    email: null,
+    display_name: 'ゲスト',
+    plan_tier: 'free',
+    monthly_ocr_used: 0,
+    monthly_ocr_limit: 5,
+    terms_accepted: true,
+  };
+}
 
 @Injectable({ providedIn: 'root' })
 export class ApiService {
   isOffline = false;
+  servicePaused = false;
+  servicePausedCode: AppErrorCode | null = null;
+  servicePausedReason = '';
+
+  clearServicePause(): void {
+    this.servicePaused = false;
+    this.servicePausedCode = null;
+    this.servicePausedReason = '';
+  }
+
+  getErrorMessage(err: unknown, context: ErrorContext = 'read'): string {
+    if (err instanceof ApiError) {
+      return err.friendlyMessage;
+    }
+    return friendlyErrorMessage('UNKNOWN', context);
+  }
 
   loadAiConfig(): AiClientConfig {
     const defaults: AiClientConfig = {
@@ -115,32 +165,85 @@ export class ApiService {
     }
   }
 
-  private async fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-    const res = await fetch(url, {
-      ...init,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(init?.headers ?? {}),
-      },
-    });
-    const contentType = res.headers.get('content-type') || '';
-    if (!res.ok || !contentType.includes('application/json')) {
-      throw new Error(`HTTP ${res.status}`);
+  private async fetchJson<T>(url: string, init?: RequestInit, context: ErrorContext = 'read'): Promise<T> {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        ...init,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(init?.headers ?? {}),
+        },
+      });
+    } catch {
+      // ネットワーク未接続・API未起動（オフラインフォールバック対象）
+      throw new ApiError('NETWORK', 0, friendlyErrorMessage('NETWORK', context));
     }
+
+    const contentType = res.headers.get('content-type') || '';
+    const isJson = contentType.includes('application/json');
+
+    if (!res.ok) {
+      let code: AppErrorCode = res.status === 503 ? 'SERVICE_PAUSED' : 'UNKNOWN';
+      let requestId: string | undefined;
+
+      if (isJson) {
+        try {
+          const body = (await res.json()) as { error?: { code?: unknown; requestId?: unknown } };
+          if (isServerErrorCode(body?.error?.code)) {
+            code = body.error.code;
+          }
+          if (typeof body?.error?.requestId === 'string') {
+            requestId = body.error.requestId;
+          }
+        } catch {
+          // ignore malformed error body
+        }
+      } else if (res.status === 404) {
+        // ng serve 単体起動など API が存在せず HTML 404 を返すケース
+        throw new ApiError('NETWORK', 404, friendlyErrorMessage('NETWORK', context));
+      }
+
+      const friendly = friendlyErrorMessage(code, context);
+      if (res.status === 503 || code === 'SERVICE_PAUSED' || code === 'CIRCUIT_OPEN') {
+        this.servicePaused = true;
+        this.servicePausedCode = code;
+        this.servicePausedReason = friendly;
+      }
+      throw new ApiError(code, res.status, friendly, requestId);
+    }
+
+    if (!isJson) {
+      throw new ApiError('NETWORK', res.status, friendlyErrorMessage('NETWORK', context));
+    }
+
+    this.clearServicePause();
     return (await res.json()) as T;
+  }
+
+  private shouldFallbackOffline(err: unknown): boolean {
+    if (err instanceof ApiError) {
+      // 503 停止・4xx 入力/権限/レート/プラン制限・500 サーバーエラーはオフライン扱いにせず UI に返す
+      return err.code === 'NETWORK';
+    }
+    return true;
   }
 
   async bootstrap(): Promise<BootstrapResponse> {
     try {
-      const data = await this.fetchJson<BootstrapResponse>('/api/bootstrap');
+      const data = await this.fetchJson<BootstrapResponse>('/api/bootstrap', undefined, 'read');
       this.isOffline = false;
       return {
         profile: data.profile,
         records: data.records ?? [],
         standards: data.standards?.length ? data.standards : REFERENCE_STANDARDS,
         providers: data.providers?.length ? data.providers : ['gemini', 'openai', 'claude'],
+        account: data.account ?? createDefaultAccountSummary(),
       };
-    } catch {
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
       this.isOffline = true;
       const local = this.loadLocalState();
       return {
@@ -148,19 +251,30 @@ export class ApiService {
         records: local.records,
         standards: REFERENCE_STANDARDS,
         providers: ['gemini', 'openai', 'claude'],
+        account: {
+          ...createDefaultAccountSummary(),
+          display_name: local.profile.name || 'ゲスト',
+        },
       };
     }
   }
 
   async updateProfile(profile: Partial<UserProfile>): Promise<UserProfile> {
     try {
-      const updated = await this.fetchJson<UserProfile>('/api/profile', {
-        method: 'PUT',
-        body: JSON.stringify(profile),
-      });
+      const updated = await this.fetchJson<UserProfile>(
+        '/api/profile',
+        {
+          method: 'PUT',
+          body: JSON.stringify(profile),
+        },
+        'write'
+      );
       this.isOffline = false;
       return updated;
-    } catch {
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
       this.isOffline = true;
       const local = this.loadLocalState();
       const updated: UserProfile = {
@@ -181,18 +295,25 @@ export class ApiService {
   ): Promise<LabRecord> {
     const apiKey = aiConfig.apiKeys[aiConfig.provider]?.trim() || undefined;
     try {
-      const saved = await this.fetchJson<LabRecord>('/api/records', {
-        method: 'POST',
-        body: JSON.stringify({
-          ...record,
-          provider: aiConfig.provider,
-          model: aiConfig.model,
-          apiKey,
-        }),
-      });
+      const saved = await this.fetchJson<LabRecord>(
+        '/api/records',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            ...record,
+            provider: aiConfig.provider,
+            model: aiConfig.model,
+            apiKey,
+          }),
+        },
+        'write'
+      );
       this.isOffline = false;
       return saved;
-    } catch {
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
       this.isOffline = true;
       const local = this.loadLocalState();
       const normalizedItems: LabItem[] = record.items.map((item) => {
@@ -243,11 +364,18 @@ export class ApiService {
 
   async deleteRecord(id: number): Promise<void> {
     try {
-      await this.fetchJson<{ deleted: boolean }>(`/api/records/${id}`, {
-        method: 'DELETE',
-      });
+      await this.fetchJson<{ deleted: boolean }>(
+        `/api/records/${id}`,
+        {
+          method: 'DELETE',
+        },
+        'delete'
+      );
       this.isOffline = false;
-    } catch {
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
       this.isOffline = true;
       const local = this.loadLocalState();
       this.saveLocalState(
@@ -266,21 +394,28 @@ export class ApiService {
   }): Promise<OcrResponse> {
     const apiKey = params.aiConfig.apiKeys[params.aiConfig.provider]?.trim() || undefined;
     try {
-      const res = await this.fetchJson<OcrResponse>('/api/ocr', {
-        method: 'POST',
-        body: JSON.stringify({
-          imageBase64: params.imageBase64,
-          mimeType: params.mimeType,
-          rawText: params.rawText,
-          provider: params.aiConfig.provider,
-          model: params.aiConfig.model,
-          apiKey,
-          sex: params.sex,
-        }),
-      });
+      const res = await this.fetchJson<OcrResponse>(
+        '/api/ocr',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            imageBase64: params.imageBase64,
+            mimeType: params.mimeType,
+            rawText: params.rawText,
+            provider: params.aiConfig.provider,
+            model: params.aiConfig.model,
+            apiKey,
+            sex: params.sex,
+          }),
+        },
+        'ocr'
+      );
       this.isOffline = false;
       return res;
-    } catch {
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
       this.isOffline = true;
       if (params.rawText && params.rawText.trim()) {
         const parsed = parseLabTextLocally(params.rawText, params.sex);
@@ -308,20 +443,27 @@ export class ApiService {
     apiKey?: string;
   }): Promise<AnalyzeResponse> {
     try {
-      const res = await this.fetchJson<AnalyzeResponse>('/api/analyze', {
-        method: 'POST',
-        body: JSON.stringify({
-          record: params.record,
-          history: params.history,
-          profile: params.profile,
-          provider: params.provider,
-          model: params.model,
-          apiKey: params.apiKey?.trim() || undefined,
-        }),
-      });
+      const res = await this.fetchJson<AnalyzeResponse>(
+        '/api/analyze',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            record: params.record,
+            history: params.history,
+            profile: params.profile,
+            provider: params.provider,
+            model: params.model,
+            apiKey: params.apiKey?.trim() || undefined,
+          }),
+        },
+        'read'
+      );
       this.isOffline = false;
       return res;
-    } catch {
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
       this.isOffline = true;
       return generateLocalAnalysis(
         params.record,

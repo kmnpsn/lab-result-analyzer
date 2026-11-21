@@ -5,15 +5,28 @@ import {
   REFERENCE_STANDARDS,
   computeFlag,
   lookupStandard,
+  type AccountSummary,
   type LabRecord,
 } from '../src/shared/types.ts';
+import { REQUEST_ID_HEADER } from '../src/shared/error-codes.ts';
 import {
   analyzeLabAndWellness,
   computePearsonCorrelation,
   extractLabFromOcr,
   parseLabText,
 } from '../worker/ai-providers.ts';
-import worker, { createDefaultProfile, resetMemoryStore } from '../worker/index.ts';
+import {
+  CIRCUIT_ERROR_THRESHOLD,
+  getCircuitState,
+  getRecentSecurityLogs,
+  resetSecurityState,
+  tripCircuitBreaker,
+} from '../worker/security.ts';
+import worker, {
+  createDefaultProfile,
+  resetMemoryStore,
+  type D1DatabaseLike,
+} from '../worker/index.ts';
 
 describe('基準値マスタ・H/N/L 判定ロジック (src/shared/types.ts)', () => {
   it('性別に応じた基準値を取得し、L / N / H フラグを正しく判定できる', () => {
@@ -92,7 +105,7 @@ describe('OCR テキスト抽出 & プリセットフォールバック (worker/
 });
 
 describe('主観10段階スコアと採血推移の相関分析エンジン (worker/ai-providers.ts)', () => {
-  it('ピアソン相関係数を正確に算出し、Hb回復と10段階体調スコア改善の相関レポートを生成できる', async () => {
+  it('ピアソン相関係数を正確に算出し、Hb回復と汎用5軸体調スコア改善の相関レポートを生成できる', async () => {
     const r = computePearsonCorrelation([11.0, 12.2, 13.5, 14.2], [3, 5, 7, 9]);
     assert.ok(r !== null && r > 0.95);
 
@@ -163,6 +176,8 @@ describe('主観10段階スコアと採血推移の相関分析エンジン (wor
     assert.equal(analysis.provider_used, 'openai');
     assert.equal(analysis.model_used, 'gpt-4o-mini');
     assert.ok(analysis.ai_summary.includes('全 3 項目'));
+    assert.ok(analysis.ai_correlation.includes('全体の調子'));
+    assert.ok(analysis.ai_correlation.includes('からだの快適さ（不調のなさ）'));
     assert.ok(analysis.ai_correlation.includes('相関係数 r='));
     assert.ok(analysis.ai_advice.includes('主治医への確認ポイント'));
     assert.ok(analysis.item_comments.Hb.includes('前回比'));
@@ -174,20 +189,31 @@ describe('Worker REST API ルーター動作検証 (worker/index.ts)', () => {
     resetMemoryStore();
   });
 
-  it('GET /api/bootstrap で初期プロフィール・4回分の採血履歴・基準値マスタ・プロバイダ一覧を返す', async () => {
+  it('GET /api/bootstrap で初期プロフィール・アカウント枠・採血4回＋体調日記3回の計7件・基準値マスタ・プロバイダ一覧を返す', async () => {
     const req = new Request('http://localhost/api/bootstrap', { method: 'GET' });
     const res = await worker.fetch(req, {});
     assert.equal(res.status, 200);
 
     const data = (await res.json()) as {
       profile: { name: string; sex: string };
+      account: AccountSummary;
       records: LabRecord[];
       standards: typeof REFERENCE_STANDARDS;
       providers: string[];
     };
 
     assert.equal(data.profile.sex, 'male');
-    assert.equal(data.records.length, 4);
+    assert.ok(data.account);
+    assert.equal(data.account.plan_tier, 'free');
+    assert.equal(data.records.length, 7);
+
+    const labRecords = data.records.filter((r) => r.record_type === 'lab');
+    const dailyRecords = data.records.filter((r) => r.record_type === 'daily');
+    assert.equal(labRecords.length, 4);
+    assert.equal(dailyRecords.length, 3);
+    assert.ok(dailyRecords.every((r) => r.items.length === 0));
+    assert.ok(dailyRecords.some((r) => (r.symptom_tags || '').includes('おなかの不調')));
+
     assert.equal(data.standards.length, REFERENCE_STANDARDS.length);
     assert.deepEqual(data.providers, ['gemini', 'openai', 'claude']);
   });
@@ -225,6 +251,7 @@ describe('Worker REST API ルーター動作検証 (worker/index.ts)', () => {
         sleep_score: 5,
         pain_score: 6,
         appetite_score: 6,
+        symptom_tags: 'だるさ・疲労, 通院・採血日',
         condition_note: '寒気と午後の眠気が強い',
         provider: 'claude',
         items: [
@@ -238,6 +265,8 @@ describe('Worker REST API ルーター動作検証 (worker/index.ts)', () => {
     assert.equal(postRes.status, 201);
     const saved = (await postRes.json()) as LabRecord;
     assert.ok(saved.id);
+    assert.equal(saved.record_type, 'lab');
+    assert.equal(saved.symptom_tags, 'だるさ・疲労, 通院・採血日');
     assert.equal(saved.ai_provider, 'claude');
     assert.ok(saved.ai_summary && saved.ai_summary.length > 10);
     assert.ok(saved.ai_correlation && saved.ai_correlation.includes('橋本病'));
@@ -257,6 +286,49 @@ describe('Worker REST API ルーター動作検証 (worker/index.ts)', () => {
     assert.equal(delRes.status, 200);
     const delData = (await delRes.json()) as { deleted: boolean };
     assert.equal(delData.deleted, true);
+  });
+
+  it('POST /api/records で採血項目が0件（items: []）の日々の体調日記（record_type: "daily"）を登録・取得・CSV出力できる', async () => {
+    const dailyReq = new Request('http://localhost/api/records', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        record_type: 'daily',
+        tested_at: '2026-11-18',
+        weight_kg: 65.0,
+        overall_score: 6,
+        fatigue_score: 5,
+        pain_score: 4,
+        sleep_score: 7,
+        appetite_score: 6,
+        symptom_tags: 'おなかの不調, お薬の変更',
+        condition_note: '朝から少しおなかの張りがあったが、夕方には落ち着いた。',
+        items: [],
+      }),
+    });
+
+    const dailyRes = await worker.fetch(dailyReq, {});
+    assert.equal(dailyRes.status, 201);
+    const savedDaily = (await dailyRes.json()) as LabRecord;
+    assert.ok(savedDaily.id);
+    assert.equal(savedDaily.record_type, 'daily');
+    assert.equal(savedDaily.items.length, 0);
+    assert.equal(savedDaily.symptom_tags, 'おなかの不調, お薬の変更');
+    assert.equal(savedDaily.facility_name, '日々の体調日記');
+    assert.ok(savedDaily.ai_summary?.includes('日々の体調日記'));
+    assert.ok(savedDaily.ai_correlation?.includes('からだの快適さ（不調のなさ）'));
+    assert.ok(savedDaily.ai_advice?.includes('主治医への確認ポイント'));
+
+    // GET /api/export/csv で UTF-8 BOM 付き CSV が出力されることを確認
+    const csvReq = new Request('http://localhost/api/export/csv', { method: 'GET' });
+    const csvRes = await worker.fetch(csvReq, {});
+    assert.equal(csvRes.status, 200);
+    const csvBytes = new Uint8Array(await csvRes.clone().arrayBuffer());
+    assert.deepEqual(Array.from(csvBytes.slice(0, 3)), [0xef, 0xbb, 0xbf]);
+    const csvText = await csvRes.text();
+    assert.ok(csvText.includes('日付,記録種別'));
+    assert.ok(csvText.includes('体調日記'));
+    assert.ok(csvText.includes('おなかの不調, お薬の変更'));
   });
 
   it('POST /api/ocr と POST /api/analyze が正常に構造化データと再分析結果を返す', async () => {
@@ -314,5 +386,148 @@ describe('Worker REST API ルーター動作検証 (worker/index.ts)', () => {
     assert.ok(analyzeJson.ai_summary.includes('低値(L) 1 項目'));
     assert.ok(analyzeJson.item_comments.Hb);
     assert.ok(analyzeJson.item_comments.CRP);
+  });
+});
+
+describe('3段構えのセキュリティ防御・サーキットブレーカー・ADR-030 構造化エラー (worker/security.ts)', () => {
+  beforeEach(() => {
+    resetMemoryStore();
+    resetSecurityState();
+  });
+
+  it('第1段: 全レスポンスにブラウザセキュリティヘッダー（CSP, HSTS, X-Frame-Options, nosniff, Permissions-Policy）と x-karada-request-id が付与される', async () => {
+    const req = new Request('http://localhost/api/bootstrap', { method: 'GET' });
+    const res = await worker.fetch(req, {});
+    assert.equal(res.status, 200);
+
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(res.headers.get('x-frame-options'), 'DENY');
+    assert.ok(res.headers.get('strict-transport-security')?.includes('max-age=31536000'));
+    assert.ok(res.headers.get('permissions-policy')?.includes('camera=(self)'));
+    assert.ok(res.headers.get('content-security-policy')?.includes("frame-ancestors 'none'"));
+    assert.ok(res.headers.get(REQUEST_ID_HEADER)?.startsWith('req_'));
+  });
+
+  it('第2段（手動メンテナンススイッチ）: MAINTENANCE_MODE=on のとき DB に一切触れず 503 SERVICE_PAUSED を返す', async () => {
+    let dbTouched = false;
+    const spyDb: D1DatabaseLike = {
+      prepare() {
+        dbTouched = true;
+        throw new Error('DB should not be touched during maintenance mode');
+      },
+    };
+
+    const req = new Request('http://localhost/api/bootstrap', { method: 'GET' });
+    const res = await worker.fetch(req, {
+      MAINTENANCE_MODE: 'on',
+      DB: spyDb,
+    });
+
+    assert.equal(res.status, 503);
+    assert.equal(dbTouched, false);
+    assert.equal(res.headers.get('Retry-After'), '300');
+
+    const body = (await res.json()) as { error: { code: string; requestId: string } };
+    assert.equal(body.error.code, 'SERVICE_PAUSED');
+    assert.ok(body.error.requestId.startsWith('req_'));
+  });
+
+  it('第3段（オート・サーキットブレーカー）: 短時間の連続内部エラー発生時に自動でサーキットが開き、以降の DB アクセスを遮断して 503 CIRCUIT_OPEN を返す', async () => {
+    let dbCallCount = 0;
+    const failingDb: D1DatabaseLike = {
+      prepare() {
+        dbCallCount++;
+        throw new Error('D1 connection failure: secret_patient_note=クローン病再燃の疑い');
+      },
+    };
+
+    // 閾値（10回）まで連続内部エラーを発生させる
+    for (let i = 0; i < CIRCUIT_ERROR_THRESHOLD; i++) {
+      const req = new Request('http://localhost/api/bootstrap', { method: 'GET' });
+      const res = await worker.fetch(req, { DB: failingDb });
+      assert.equal(res.status, 500);
+      const errBody = (await res.json()) as { error: { code: string; requestId: string } };
+      assert.equal(errBody.error.code, 'INTERNAL');
+    }
+
+    assert.equal(dbCallCount, CIRCUIT_ERROR_THRESHOLD);
+    assert.equal(getCircuitState().open, true);
+    assert.equal(getCircuitState().reason, 'error_spike');
+
+    // 11回目のリクエストはサーキットブレーカーにより DB に一切触れず 503 CIRCUIT_OPEN になる
+    const blockedReq = new Request('http://localhost/api/bootstrap', { method: 'GET' });
+    const blockedRes = await worker.fetch(blockedReq, { DB: failingDb });
+    assert.equal(blockedRes.status, 503);
+    assert.equal(dbCallCount, CIRCUIT_ERROR_THRESHOLD); // DB 呼び出し回数が増えていないことを検証
+    assert.equal(blockedRes.headers.get('Retry-After'), '60');
+
+    const blockedBody = (await blockedRes.json()) as { error: { code: string; requestId: string } };
+    assert.equal(blockedBody.error.code, 'CIRCUIT_OPEN');
+
+    // ADR-030: 構造化ログに検査値や患者メモ等の個人情報が一切含まれていないことを検証
+    const logs = getRecentSecurityLogs();
+    assert.ok(logs.length > 0);
+    for (const logEntry of logs) {
+      const serialized = JSON.stringify(logEntry);
+      assert.ok(!serialized.includes('クローン病'));
+      assert.ok(!serialized.includes('secret_patient_note'));
+      assert.deepEqual(Object.keys(logEntry).sort(), [
+        'code',
+        'level',
+        'requestId',
+        'route',
+        'status',
+        'timestamp',
+      ]);
+    }
+
+    // リセット後は再び正常応答に戻ることを確認
+    resetSecurityState();
+    assert.equal(getCircuitState().open, false);
+    const okRes = await worker.fetch(new Request('http://localhost/api/bootstrap', { method: 'GET' }), {});
+    assert.equal(okRes.status, 200);
+  });
+
+  it('ADR-030 構造化エラー応答: 不正JSON・未定義ルート・メソッド不一致に対して固定エラーコードのみを返す', async () => {
+    // 1. 不正JSON -> 400 REQUEST_INVALID
+    const invalidRes = await worker.fetch(
+      new Request('http://localhost/api/records', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{ invalid json ',
+      }),
+      {}
+    );
+    assert.equal(invalidRes.status, 400);
+    const invalidJson = (await invalidRes.json()) as { error: { code: string; requestId: string } };
+    assert.equal(invalidJson.error.code, 'REQUEST_INVALID');
+
+    // 2. 未定義ルート -> 404 ROUTE_NOT_FOUND
+    const notFoundRes = await worker.fetch(
+      new Request('http://localhost/api/unknown-endpoint', { method: 'GET' }),
+      {}
+    );
+    assert.equal(notFoundRes.status, 404);
+    const notFoundJson = (await notFoundRes.json()) as { error: { code: string; requestId: string } };
+    assert.equal(notFoundJson.error.code, 'ROUTE_NOT_FOUND');
+
+    // 3. 許可されていないメソッド -> 405 METHOD_NOT_ALLOWED
+    const methodRes = await worker.fetch(
+      new Request('http://localhost/api/bootstrap', { method: 'DELETE' }),
+      {}
+    );
+    assert.equal(methodRes.status, 405);
+    const methodJson = (await methodRes.json()) as { error: { code: string; requestId: string } };
+    assert.equal(methodJson.error.code, 'METHOD_NOT_ALLOWED');
+
+    // 4. 手動 tripCircuitBreaker 発火テスト
+    tripCircuitBreaker('manual');
+    const circuitRes = await worker.fetch(
+      new Request('http://localhost/api/bootstrap', { method: 'GET' }),
+      {}
+    );
+    assert.equal(circuitRes.status, 503);
+    const circuitJson = (await circuitRes.json()) as { error: { code: string; requestId: string } };
+    assert.equal(circuitJson.error.code, 'CIRCUIT_OPEN');
   });
 });

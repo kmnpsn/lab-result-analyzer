@@ -2,18 +2,21 @@ import { CommonModule } from '@angular/common';
 import { Component, OnInit } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import {
+  AccountSummary,
   AiProviderName,
   BiologicalSex,
   LabFlag,
   LabItem,
   LabRecord,
   REFERENCE_STANDARDS,
+  RecordType,
   ReferenceStandard,
+  SYMPTOM_TAG_PRESETS,
   UserProfile,
   computeFlag,
   lookupStandard,
 } from '../shared/types';
-import { AiClientConfig, ApiService } from './api.service';
+import { AiClientConfig, ApiService, createDefaultAccountSummary } from './api.service';
 import {
   CorrelationInsight,
   PROVIDER_META,
@@ -48,7 +51,7 @@ interface ChartWellnessSeries {
   shortLabel: string;
   color: string;
   polyline: string;
-  points: Array<{ x: number; y: number; value: number; date: string }>;
+  points: Array<{ index: number; x: number; y: number; value: number; date: string; record: LabRecord }>;
 }
 
 interface ChartModel {
@@ -120,14 +123,21 @@ export class AppComponent implements OnInit {
   records: LabRecord[] = [];
   standards: ReferenceStandard[] = REFERENCE_STANDARDS;
   providers: AiProviderName[] = ['gemini', 'openai', 'claude'];
+  account: AccountSummary = createDefaultAccountSummary();
   aiConfig: AiClientConfig;
 
   readonly providerMeta = PROVIDER_META;
   readonly wellnessMetrics = WELLNESS_METRICS;
+  readonly symptomTagPresets = SYMPTOM_TAG_PRESETS;
   readonly quickChartCodes = ['Hb', 'CRP', 'Ferritin', 'ALT', 'eGFR', 'HbA1c', 'WBC', 'TSH', 'LDL'];
 
-  // タブ1: チャート設定
+  // サーキットブレーカー / メンテナンス待機画面
+  previewServicePause = false;
+  retryingPause = false;
+
+  // タブ1: チャート設定 & 記録フィルタ
   selectedChartCode = 'Hb';
+  recordFilter: 'all' | 'lab' | 'daily' = 'all';
   wellnessSelection: Record<WellnessMetricDef['key'], boolean> = {
     overall_score: true,
     fatigue_score: true,
@@ -138,7 +148,9 @@ export class AppComponent implements OnInit {
   showWeightOverlay = true;
   hoveredPointIndex: number | null = null;
 
-  // タブ2: 登録フォーム
+  // タブ2: 登録フォーム（2モード: daily / lab）
+  formRecordType: RecordType = 'daily';
+  formSymptomTags: string[] = [];
   formTestedAt = new Date().toISOString().slice(0, 10);
   formFacilityName = '';
   formWeightKg: number | null = null;
@@ -172,6 +184,10 @@ export class AppComponent implements OnInit {
   }
 
   async ngOnInit(): Promise<void> {
+    await this.loadInitialData();
+  }
+
+  private async loadInitialData(): Promise<void> {
     this.loading = true;
     try {
       const data = await this.api.bootstrap();
@@ -180,6 +196,9 @@ export class AppComponent implements OnInit {
       this.records = this.sortRecordsDesc(data.records);
       this.standards = data.standards;
       this.providers = data.providers;
+      if (data.account) {
+        this.account = data.account;
+      }
 
       if (this.records.length > 0) {
         this.selectedRecordId = this.records[0].id ?? null;
@@ -196,8 +215,46 @@ export class AppComponent implements OnInit {
       // 登録フォーム初期行（標準項目を3つだけ用意）
       this.initDefaultFormItems();
       this.syncThemeColor();
+    } catch (err) {
+      if (!this.isServicePaused) {
+        this.showToast(this.api.getErrorMessage(err, 'read'), 'error');
+      }
     } finally {
       this.loading = false;
+    }
+  }
+
+  // ===== サーキットブレーカー / メンテナンス待機画面 =====
+
+  get isServicePaused(): boolean {
+    return this.api.servicePaused || this.previewServicePause;
+  }
+
+  get servicePauseMessage(): string {
+    if (this.api.servicePaused && this.api.servicePausedReason) {
+      return this.api.servicePausedReason;
+    }
+    return 'ただいまアクセスが集中しているか、点検のため一時的に止めています。入力中の内容は保存されていません。しばらくしてからもう一度開いてください。';
+  }
+
+  toggleServicePausePreview(): void {
+    this.previewServicePause = !this.previewServicePause;
+  }
+
+  async retryFromPause(): Promise<void> {
+    if (this.previewServicePause && !this.api.servicePaused) {
+      this.previewServicePause = false;
+      return;
+    }
+    this.retryingPause = true;
+    try {
+      this.api.clearServicePause();
+      await this.loadInitialData();
+      if (!this.isServicePaused) {
+        this.showToast('最新の状態を読み込みました', 'success');
+      }
+    } finally {
+      this.retryingPause = false;
     }
   }
 
@@ -272,6 +329,48 @@ export class AppComponent implements OnInit {
 
   get latestRecord(): LabRecord | null {
     return this.records.length > 0 ? this.records[0] : null;
+  }
+
+  getRecordType(record: LabRecord): RecordType {
+    if (record.record_type === 'daily') return 'daily';
+    if (record.record_type === 'lab') return 'lab';
+    return record.items.length > 0 ? 'lab' : 'daily';
+  }
+
+  getRecordTags(record: LabRecord): string[] {
+    return (record.symptom_tags || '')
+      .split(/[,、\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  get filteredRecords(): LabRecord[] {
+    if (this.recordFilter === 'all') return this.records;
+    return this.records.filter((r) => this.getRecordType(r) === this.recordFilter);
+  }
+
+  get labRecordCount(): number {
+    return this.records.filter((r) => this.getRecordType(r) === 'lab').length;
+  }
+
+  get dailyRecordCount(): number {
+    return this.records.filter((r) => this.getRecordType(r) === 'daily').length;
+  }
+
+  get latestLabRecord(): LabRecord | null {
+    return this.records.find((r) => this.getRecordType(r) === 'lab') ?? null;
+  }
+
+  getRegistrationModeLabel(): string {
+    if (this.account.registration_mode === 'invite_only') return '招待制（クローズド運用）';
+    if (this.account.registration_mode === 'open') return '一般公開モード';
+    return 'デモモード（お試し利用）';
+  }
+
+  getPlanTierLabel(): string {
+    if (this.account.plan_tier === 'pro') return 'プロプラン';
+    if (this.account.plan_tier === 'plus') return 'プラスプラン';
+    return '無料プラン';
   }
 
   get bmi(): string {
@@ -427,11 +526,14 @@ export class AppComponent implements OnInit {
       label: String(s),
     }));
 
-    const xLabels = sortedRecords.map((rec, index) => ({
-      x: xFor(index),
-      label: rec.tested_at.slice(5), // MM-DD
-      index,
-    }));
+    const labelStep = sortedRecords.length > 8 ? Math.ceil(sortedRecords.length / 7) : 1;
+    const xLabels = sortedRecords
+      .map((rec, index) => ({
+        x: xFor(index),
+        label: rec.tested_at.slice(5), // MM-DD
+        index,
+      }))
+      .filter((_, idx) => idx === 0 || idx === sortedRecords.length - 1 || idx % labelStep === 0);
 
     const labPoints: ChartLabPoint[] = [];
     sortedRecords.forEach((rec, index) => {
@@ -453,10 +555,12 @@ export class AppComponent implements OnInit {
       .filter((m) => this.wellnessSelection[m.key])
       .map((m) => {
         const pts = sortedRecords.map((rec, index) => ({
+          index,
           x: xFor(index),
           y: yRight(rec[m.key]),
           value: rec[m.key],
           date: rec.tested_at,
+          record: rec,
         }));
         return {
           key: m.key,
@@ -549,18 +653,45 @@ export class AppComponent implements OnInit {
   async deleteRecord(record: LabRecord, event?: Event): Promise<void> {
     if (event) event.stopPropagation();
     if (record.id === undefined) return;
-    if (!confirm(`${record.tested_at}（${record.facility_name || '記録'}）を削除しますか？`)) {
+    const label = record.facility_name || (this.getRecordType(record) === 'daily' ? '体調日記' : '記録');
+    if (!confirm(`${record.tested_at}（${label}）を削除しますか？`)) {
       return;
     }
-    await this.api.deleteRecord(record.id);
-    this.records = this.records.filter((r) => r.id !== record.id);
-    if (this.selectedRecordId === record.id) {
-      this.selectedRecordId = this.records[0]?.id ?? null;
+    try {
+      await this.api.deleteRecord(record.id);
+      this.records = this.records.filter((r) => r.id !== record.id);
+      if (this.selectedRecordId === record.id) {
+        this.selectedRecordId = this.records[0]?.id ?? null;
+      }
+      this.showToast('記録を削除しました', 'info');
+    } catch (err) {
+      if (!this.isServicePaused) {
+        this.showToast(this.api.getErrorMessage(err, 'delete'), 'error');
+      }
     }
-    this.showToast('採血記録を削除しました', 'info');
   }
 
-  // ===== タブ2: 採血登録 & OCR =====
+  // ===== タブ2: 記録フォーム（体調日記 / 採血結果＋体調） =====
+
+  setFormRecordType(type: RecordType): void {
+    this.formRecordType = type;
+    if (type === 'lab' && this.formItems.length === 0) {
+      this.initDefaultFormItems();
+    }
+  }
+
+  toggleSymptomTag(tag: string): void {
+    const idx = this.formSymptomTags.indexOf(tag);
+    if (idx >= 0) {
+      this.formSymptomTags.splice(idx, 1);
+    } else {
+      this.formSymptomTags.push(tag);
+    }
+  }
+
+  hasSymptomTag(tag: string): boolean {
+    return this.formSymptomTags.includes(tag);
+  }
 
   private initDefaultFormItems(): void {
     this.formItems = ['Hb', 'CRP', 'Ferritin'].map((code) => this.buildItemFromCode(code, 0));
@@ -631,9 +762,12 @@ export class AppComponent implements OnInit {
       });
 
       this.applyOcrResponse(res);
-    } catch {
-      this.ocrStatusMessage = 'ファイルの読み取りに失敗しました。テキスト貼り付けまたは手入力をご利用ください。';
-      this.showToast('画像/PDF の読み取りに失敗しました', 'error');
+    } catch (err) {
+      const msg = this.api.getErrorMessage(err, 'ocr');
+      this.ocrStatusMessage = msg;
+      if (!this.isServicePaused) {
+        this.showToast(msg, 'error');
+      }
     } finally {
       this.ocrLoading = false;
     }
@@ -653,6 +787,12 @@ export class AppComponent implements OnInit {
         aiConfig: this.aiConfig,
       });
       this.applyOcrResponse(res);
+    } catch (err) {
+      const msg = this.api.getErrorMessage(err, 'ocr');
+      this.ocrStatusMessage = msg;
+      if (!this.isServicePaused) {
+        this.showToast(msg, 'error');
+      }
     } finally {
       this.ocrLoading = false;
     }
@@ -686,6 +826,7 @@ export class AppComponent implements OnInit {
 
   loadSampleToForm(): void {
     const sample = createSampleOcrResult(this.profile.sex);
+    this.formRecordType = 'lab';
     this.formTestedAt = sample.tested_at;
     this.formFacilityName = sample.facility_name;
     this.formWeightKg = this.latestRecord?.weight_kg ?? 54.5;
@@ -694,6 +835,7 @@ export class AppComponent implements OnInit {
     this.formSleep = 6;
     this.formPain = 5;
     this.formAppetite = 7;
+    this.formSymptomTags = ['だるさ・疲労', '関節・筋肉の違和感', '通院・採血日'];
     this.formConditionNote = 'ここ2週間ほど午後のだるさと軽度の関節違和感あり。鉄剤を隔日服用中。';
     this.formItems = sample.items;
     this.ocrRawText = sample.items.map((i) => `${i.item_code} ${i.value} ${i.unit}`).join('\n');
@@ -752,6 +894,7 @@ export class AppComponent implements OnInit {
     this.formSleep = 7;
     this.formPain = 7;
     this.formAppetite = 7;
+    this.formSymptomTags = [];
     this.formConditionNote = '';
     this.ocrRawText = '';
     this.ocrFileName = '';
@@ -762,20 +905,27 @@ export class AppComponent implements OnInit {
 
   async saveRecordAndAnalyze(): Promise<void> {
     if (!this.formTestedAt) {
-      this.showToast('採血日を入力してください', 'error');
+      this.showToast('日付を入力してください', 'error');
       return;
     }
-    const validItems = this.formItems.filter((it) => it.item_name.trim() !== '' && Number.isFinite(Number(it.value)));
-    if (validItems.length === 0) {
-      this.showToast('採血項目を1つ以上入力してください', 'error');
+
+    const isDaily = this.formRecordType === 'daily';
+    const validItems = isDaily
+      ? []
+      : this.formItems.filter((it) => it.item_name.trim() !== '' && Number.isFinite(Number(it.value)));
+
+    if (!isDaily && validItems.length === 0) {
+      this.showToast('採血項目を1つ以上入力するか、「今日の体調日記だけつける」に切り替えてください', 'error');
       return;
     }
 
     this.saving = true;
     try {
       const payload: LabRecord = {
+        record_type: this.formRecordType,
+        symptom_tags: this.formSymptomTags.join(', '),
         tested_at: this.formTestedAt,
-        facility_name: this.formFacilityName.trim() || 'かかりつけ医療機関',
+        facility_name: isDaily ? '' : this.formFacilityName.trim() || 'かかりつけ医療機関',
         weight_kg: this.formWeightKg !== null && Number.isFinite(Number(this.formWeightKg)) ? Number(this.formWeightKg) : null,
         overall_score: Number(this.formOverall),
         fatigue_score: Number(this.formFatigue),
@@ -800,10 +950,14 @@ export class AppComponent implements OnInit {
       const saved = await this.api.createRecord(payload, this.records, this.profile, this.aiConfig);
       this.records = this.sortRecordsDesc([saved, ...this.records.filter((r) => r.id !== saved.id)]);
       this.selectedRecordId = saved.id ?? null;
+      this.formSymptomTags = [];
+      this.formConditionNote = '';
       this.selectTab('detail');
-      this.showToast('記録を保存しました', 'success');
-    } catch {
-      this.showToast('保存できませんでした。入力内容は画面に残っていますので、もう一度「保存」をお試しください。', 'error');
+      this.showToast(isDaily ? '体調日記を保存しました' : '採血結果と体調を保存しました', 'success');
+    } catch (err) {
+      if (!this.isServicePaused) {
+        this.showToast(this.api.getErrorMessage(err, 'write'), 'error');
+      }
     } finally {
       this.saving = false;
     }
@@ -825,6 +979,12 @@ export class AppComponent implements OnInit {
     if (!current) return null;
     const idx = this.records.findIndex((r) => r.id === current.id);
     if (idx < 0 || idx + 1 >= this.records.length) return null;
+    // 採血項目がある場合は直前の採血ありレコードと比較
+    if (current.items.length > 0) {
+      for (let i = idx + 1; i < this.records.length; i++) {
+        if (this.records[i].items.length > 0) return this.records[i];
+      }
+    }
     return this.records[idx + 1];
   }
 
@@ -900,14 +1060,16 @@ export class AppComponent implements OnInit {
       }
 
       this.showToast('ふりかえりコメントを更新しました', 'success');
-    } catch {
-      this.showToast('コメントの更新ができませんでした。少し時間をおいてもう一度お試しください。', 'error');
+    } catch (err) {
+      if (!this.isServicePaused) {
+        this.showToast(this.api.getErrorMessage(err, 'read'), 'error');
+      }
     } finally {
       this.analyzing = false;
     }
   }
 
-  // ===== タブ4: プロフィール & AI 設定 =====
+  // ===== タブ4: プロフィール & 設定 & CSV書き出し =====
 
   async saveProfile(): Promise<void> {
     this.saving = true;
@@ -931,9 +1093,84 @@ export class AppComponent implements OnInit {
       }
 
       this.showToast('プロフィールと持病設定を保存しました（基準値マスタ連動済み）', 'success');
+    } catch (err) {
+      if (!this.isServicePaused) {
+        this.showToast(this.api.getErrorMessage(err, 'write'), 'error');
+      }
     } finally {
       this.saving = false;
     }
+  }
+
+  exportRecordsCsv(): void {
+    if (this.records.length === 0) {
+      this.showToast('書き出す記録がまだありません', 'info');
+      return;
+    }
+
+    const majorCodes = ['WBC', 'Hb', 'Ferritin', 'CRP', 'AST', 'ALT', 'eGFR', 'HbA1c', 'LDL', 'TSH'];
+    const headers = [
+      '日付',
+      '記録種別',
+      '医療機関',
+      '体重(kg)',
+      '全体の調子',
+      '元気さ・だるさのなさ',
+      'からだの快適さ(不調のなさ)',
+      '睡眠・休養',
+      '食事・日常生活',
+      '症状タグ',
+      'ひとことメモ',
+      ...majorCodes,
+    ];
+
+    const escapeCsv = (val: string | number | null | undefined): string => {
+      if (val === null || val === undefined) return '';
+      const str = String(val);
+      if (/[",\r\n]/.test(str)) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    const sortedAsc = [...this.records].sort((a, b) => a.tested_at.localeCompare(b.tested_at));
+    const rows = sortedAsc.map((rec) => {
+      const typeLabel = this.getRecordType(rec) === 'daily' ? '体調日記' : '採血あり';
+      const labValues = majorCodes.map((code) => {
+        const found = rec.items.find((it) => it.item_code === code);
+        return found ? found.value : '';
+      });
+      return [
+        rec.tested_at,
+        typeLabel,
+        rec.facility_name || '',
+        rec.weight_kg ?? '',
+        rec.overall_score,
+        rec.fatigue_score,
+        rec.pain_score,
+        rec.sleep_score,
+        rec.appetite_score,
+        rec.symptom_tags || '',
+        rec.condition_note || '',
+        ...labValues,
+      ]
+        .map(escapeCsv)
+        .join(',');
+    });
+
+    const csvContent = '\uFEFF' + [headers.map(escapeCsv).join(','), ...rows].join('\r\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    a.href = url;
+    a.download = `karada-note-records-${stamp}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    this.showToast(`${this.records.length} 件の記録を CSV で書き出しました`, 'success');
   }
 
   selectProvider(provider: AiProviderName): void {

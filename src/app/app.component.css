@@ -1289,6 +1289,344 @@ button:disabled {
   color: var(--text-muted);
 }
 
+/* ===== サーキットブレーカー / メンテナンス待機画面 ===== */
+.pause-gate {
+  flex: 1;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem 1rem;
+  background: radial-gradient(circle at top, rgba(56, 189, 248, 0.12), transparent 60%);
+}
+
+.pause-card {
+  width: 100%;
+  max-width: 480px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2rem 1.5rem;
+  text-align: center;
+  box-shadow: var(--shadow);
+}
+
+.pause-icon {
+  font-size: 2.4rem;
+  margin-bottom: 0.75rem;
+}
+
+.pause-card h1 {
+  margin: 0 0 0.75rem;
+  font-size: 1.2rem;
+  line-height: 1.4;
+}
+
+.pause-message {
+  margin: 0 0 1.25rem;
+  font-size: 0.92rem;
+  line-height: 1.7;
+  color: #cbd5e1;
+}
+
+.pause-preview-badge {
+  margin: 0 0 1rem;
+  font-size: 0.78rem;
+  color: var(--warn);
+}
+
+.pause-actions {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 1.1rem;
+}
+
+.pause-foot {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+/* ===== 記録種別バッジ・フィルタ・症状タグ ===== */
+.record-filter-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.record-type-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.74rem;
+  font-weight: 700;
+  padding: 0.14rem 0.55rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.record-type-badge.type-lab {
+  background: rgba(56, 189, 248, 0.16);
+  color: #7dd3fc;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+}
+
+.record-type-badge.type-daily {
+  background: rgba(52, 211, 153, 0.16);
+  color: #6ee7b7;
+  border: 1px solid rgba(52, 211, 153, 0.35);
+}
+
+.tooltip-title-group,
+.detail-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.symptom-tags-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.45rem;
+}
+
+.symptom-tags-row.compact {
+  margin-top: 0.45rem;
+  margin-bottom: 0;
+}
+
+.symptom-tags-row.detail-tags {
+  margin-top: 0.75rem;
+  margin-bottom: 0;
+}
+
+.symptom-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.74rem;
+  font-weight: 600;
+  padding: 0.14rem 0.52rem;
+  border-radius: 999px;
+  background: rgba(167, 139, 250, 0.16);
+  color: #ddd6fe;
+  border: 1px solid rgba(167, 139, 250, 0.32);
+}
+
+/* ===== 2モード記録切替ピル & 症状タグトグル ===== */
+.mode-switch-panel {
+  padding: 0.9rem 1rem;
+}
+
+.mode-switch-pills {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+.mode-switch-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  text-align: left;
+  padding: 0.85rem 1rem;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  min-width: 0;
+}
+
+.mode-switch-btn:hover {
+  border-color: var(--primary);
+  color: var(--text);
+}
+
+.mode-switch-btn.active {
+  background: rgba(56, 189, 248, 0.14);
+  border-color: var(--primary);
+  color: var(--text);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.25);
+}
+
+.mode-btn-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.mode-btn-sub {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.symptom-tags-field {
+  margin-top: 0.25rem;
+  margin-bottom: 0.95rem;
+}
+
+.symptom-toggle-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.symptom-toggle-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 0.34rem 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.symptom-toggle-btn:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.symptom-toggle-btn.active {
+  background: rgba(167, 139, 250, 0.22);
+  border-color: var(--accent);
+  color: #f5f3ff;
+}
+
+.daily-only-notice {
+  padding: 1.4rem 1rem;
+  font-size: 0.88rem;
+}
+
+/* ===== アカウント・ご利用プラン・CSV書き出し・ポリシー ===== */
+.account-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.9rem;
+}
+
+.account-stat-box {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.account-stat-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.account-stat-val {
+  font-size: 0.92rem;
+  color: var(--text);
+}
+
+.plan-badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.plan-tier-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.76rem;
+  font-weight: 700;
+  padding: 0.14rem 0.55rem;
+  border-radius: 999px;
+  background: var(--normal-soft);
+  color: var(--normal);
+  border: 1px solid rgba(52, 211, 153, 0.35);
+}
+
+.plan-quota-text {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.plan-upgrade-note {
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.24);
+  border-radius: var(--radius-sm);
+  padding: 0.8rem 0.95rem;
+  margin-bottom: 0.95rem;
+  font-size: 0.82rem;
+}
+
+.plan-upgrade-note strong {
+  display: block;
+  margin-bottom: 0.3rem;
+  color: #e0f2fe;
+}
+
+.plan-upgrade-note p {
+  margin: 0;
+  color: #cbd5e1;
+  line-height: 1.55;
+}
+
+.export-block {
+  margin-bottom: 1rem;
+}
+
+.export-csv-btn {
+  width: 100%;
+  padding: 0.68rem 1rem;
+  font-size: 0.9rem;
+}
+
+.export-help {
+  margin: 0.4rem 0 0;
+  font-size: 0.77rem;
+  color: var(--text-muted);
+}
+
+.policy-box {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.85rem 1rem;
+}
+
+.policy-box h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.88rem;
+}
+
+.policy-box ul {
+  margin: 0;
+  padding-left: 1.15rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+  line-height: 1.55;
+}
+
+.policy-preview-row {
+  margin-top: 0.75rem;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.small-btn {
+  padding: 0.34rem 0.7rem;
+  font-size: 0.76rem;
+}
+
 @media (max-width: 768px) {
   .desktop-title,
   .tab-nav,
@@ -1424,7 +1762,9 @@ button:disabled {
   .sliders-grid,
   .ai-cards-grid,
   .settings-grid,
-  .gauge-row {
+  .gauge-row,
+  .mode-switch-pills,
+  .account-status-grid {
     grid-template-columns: minmax(0, 1fr) !important;
     gap: 0.7rem;
     min-width: 0;

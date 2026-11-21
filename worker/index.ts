@@ -1,11 +1,14 @@
 import {
   REFERENCE_STANDARDS,
   computeFlag,
-  lookupStandard,
+  type AccountSummary,
   type AiProviderName,
   type BiologicalSex,
   type LabItem,
   type LabRecord,
+  type PlanTier,
+  type RecordType,
+  type RegistrationMode,
   type UserProfile,
 } from '../src/shared/types.ts';
 import {
@@ -17,6 +20,15 @@ import {
   normalizeLabItem,
   type AiEnv,
 } from './ai-providers.ts';
+import {
+  createErrorResponse,
+  evaluateSecurityGate,
+  finalizeResponse,
+  generateRequestId,
+  recordServerFailure,
+  resetSecurityState,
+  type SecurityEnv,
+} from './security.ts';
 
 export interface D1PreparedStatementLike {
   bind(...values: unknown[]): D1PreparedStatementLike;
@@ -31,27 +43,24 @@ export interface D1DatabaseLike {
   exec?(query: string): Promise<unknown>;
 }
 
-export interface WorkerEnv extends AiEnv {
+export interface WorkerEnv extends AiEnv, SecurityEnv {
   DB?: D1DatabaseLike;
+  REGISTRATION_MODE?: RegistrationMode;
   ASSETS?: {
     fetch(request: Request): Promise<Response>;
   };
 }
 
-const CORS_HEADERS: Record<string, string> = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-};
+const MAX_JSON_BODY_BYTES = 5 * 1024 * 1024; // 5MB
 
-function jsonResponse(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
+function jsonResponse(data: unknown, requestId: string, status = 200): Response {
+  const raw = new Response(JSON.stringify(data), {
     status,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
-      ...CORS_HEADERS,
     },
   });
+  return finalizeResponse(raw, requestId);
 }
 
 export function createDefaultProfile(): UserProfile {
@@ -70,6 +79,23 @@ export function createDefaultProfile(): UserProfile {
   };
 }
 
+export function createDefaultAccount(profile?: UserProfile, env?: WorkerEnv): AccountSummary {
+  const regMode: RegistrationMode =
+    env?.REGISTRATION_MODE === 'open' || env?.REGISTRATION_MODE === 'demo'
+      ? env.REGISTRATION_MODE
+      : 'invite_only';
+  return {
+    registration_mode: regMode,
+    authenticated: true,
+    email: null,
+    display_name: profile?.name || 'サンプル利用者',
+    plan_tier: 'free',
+    monthly_ocr_used: 1,
+    monthly_ocr_limit: 10,
+    terms_accepted: true,
+  };
+}
+
 export function createSeedRecords(profile: UserProfile): LabRecord[] {
   const sex = profile.sex;
   const rawSeeds: Array<
@@ -79,6 +105,8 @@ export function createSeedRecords(profile: UserProfile): LabRecord[] {
   > = [
     {
       id: 1,
+      record_type: 'lab',
+      symptom_tags: 'だるさ・疲労, 睡眠不足, 通院・採血日',
       tested_at: '2026-02-15',
       facility_name: '東京ベイ総合内科クリニック',
       weight_kg: 68.4,
@@ -110,6 +138,26 @@ export function createSeedRecords(profile: UserProfile): LabRecord[] {
     },
     {
       id: 2,
+      record_type: 'daily',
+      symptom_tags: 'おなかの不調, だるさ・疲労',
+      tested_at: '2026-04-02',
+      facility_name: '日々の体調日記',
+      weight_kg: 67.8,
+      overall_score: 5,
+      fatigue_score: 4,
+      sleep_score: 5,
+      pain_score: 5,
+      appetite_score: 6,
+      condition_note: '季節の変わり目で少しおなかの張りと午後のだるさがあるが、鉄剤は毎日継続できている。',
+      ai_provider: 'gemini',
+      ai_model: 'gemini-2.5-flash',
+      created_at: '2026-04-02T20:00:00Z',
+      rawItems: [],
+    },
+    {
+      id: 3,
+      record_type: 'lab',
+      symptom_tags: 'お薬の変更, 睡眠不足, 通院・採血日',
       tested_at: '2026-05-18',
       facility_name: '東京ベイ総合内科クリニック',
       weight_kg: 67.2,
@@ -140,7 +188,27 @@ export function createSeedRecords(profile: UserProfile): LabRecord[] {
       ],
     },
     {
-      id: 3,
+      id: 4,
+      record_type: 'daily',
+      symptom_tags: 'お薬の変更, 体調安定',
+      tested_at: '2026-07-05',
+      facility_name: '日々の体調日記',
+      weight_kg: 66.5,
+      overall_score: 7,
+      fatigue_score: 6,
+      sleep_score: 6,
+      pain_score: 7,
+      appetite_score: 8,
+      condition_note: 'お薬の併用開始から1か月半が経過し、おなかの違和感や立ちくらみが落ち着いてきた。',
+      ai_provider: 'gemini',
+      ai_model: 'gemini-2.5-flash',
+      created_at: '2026-07-05T20:15:00Z',
+      rawItems: [],
+    },
+    {
+      id: 5,
+      record_type: 'lab',
+      symptom_tags: '体調安定, 通院・採血日',
       tested_at: '2026-08-20',
       facility_name: '東京ベイ総合内科クリニック',
       weight_kg: 66.0,
@@ -171,7 +239,27 @@ export function createSeedRecords(profile: UserProfile): LabRecord[] {
       ],
     },
     {
-      id: 4,
+      id: 6,
+      record_type: 'daily',
+      symptom_tags: '体調安定',
+      tested_at: '2026-10-04',
+      facility_name: '日々の体調日記',
+      weight_kg: 65.5,
+      overall_score: 8,
+      fatigue_score: 8,
+      sleep_score: 8,
+      pain_score: 8,
+      appetite_score: 9,
+      condition_note: '朝すっきり起きられる日が増え、食事も普段どおり美味しく摂れている。',
+      ai_provider: 'gemini',
+      ai_model: 'gemini-2.5-flash',
+      created_at: '2026-10-04T20:30:00Z',
+      rawItems: [],
+    },
+    {
+      id: 7,
+      record_type: 'lab',
+      symptom_tags: '体調安定, 通院・採血日',
       tested_at: '2026-11-10',
       facility_name: '東京ベイ総合内科クリニック',
       weight_kg: 65.2,
@@ -216,8 +304,12 @@ export function createSeedRecords(profile: UserProfile): LabRecord[] {
       };
     });
 
+    const recordType: RecordType = items.length === 0 ? 'daily' : seed.record_type || 'lab';
+
     const draftRecord: LabRecord = {
       id: seed.id,
+      record_type: recordType,
+      symptom_tags: seed.symptom_tags || '',
       tested_at: seed.tested_at,
       facility_name: seed.facility_name,
       weight_kg: seed.weight_kg,
@@ -258,6 +350,7 @@ export function createSeedRecords(profile: UserProfile): LabRecord[] {
 
 interface MemoryStoreState {
   profile: UserProfile;
+  account: AccountSummary;
   records: LabRecord[];
   nextRecordId: number;
   nextItemId: number;
@@ -265,6 +358,7 @@ interface MemoryStoreState {
 
 function createInitialMemoryState(): MemoryStoreState {
   const profile = createDefaultProfile();
+  const account = createDefaultAccount(profile);
   const records = createSeedRecords(profile);
   const maxRecordId = records.reduce((max, r) => Math.max(max, r.id || 0), 0);
   const maxItemId = records.reduce(
@@ -273,6 +367,7 @@ function createInitialMemoryState(): MemoryStoreState {
   );
   return {
     profile,
+    account,
     records,
     nextRecordId: maxRecordId + 1,
     nextItemId: maxItemId + 1,
@@ -283,6 +378,7 @@ let memoryStore: MemoryStoreState = createInitialMemoryState();
 
 export function resetMemoryStore(): void {
   memoryStore = createInitialMemoryState();
+  resetSecurityState();
 }
 
 function clampScore(val: unknown, fallback = 5): number {
@@ -291,8 +387,20 @@ function clampScore(val: unknown, fallback = 5): number {
   return Math.min(10, Math.max(1, Math.round(n)));
 }
 
-async function ensureD1Seeded(db: D1DatabaseLike): Promise<void> {
-  // Ensure tables exist
+function normalizeSymptomTags(raw: unknown): string {
+  if (Array.isArray(raw)) {
+    return raw
+      .map((s) => String(s ?? '').trim())
+      .filter(Boolean)
+      .join(', ');
+  }
+  if (typeof raw === 'string') {
+    return raw.trim();
+  }
+  return '';
+}
+
+export async function ensureD1Schema(db: D1DatabaseLike): Promise<void> {
   await db
     .prepare(
       `CREATE TABLE IF NOT EXISTS user_profile (
@@ -315,6 +423,8 @@ async function ensureD1Seeded(db: D1DatabaseLike): Promise<void> {
     .prepare(
       `CREATE TABLE IF NOT EXISTS lab_records (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        record_type TEXT NOT NULL DEFAULT 'lab' CHECK (record_type IN ('daily', 'lab')),
+        symptom_tags TEXT NOT NULL DEFAULT '',
         tested_at TEXT NOT NULL,
         facility_name TEXT NOT NULL DEFAULT '',
         weight_kg REAL,
@@ -334,6 +444,22 @@ async function ensureD1Seeded(db: D1DatabaseLike): Promise<void> {
     )
     .run();
 
+  // 既存の lab_records に record_type / symptom_tags が無い場合は ALTER TABLE で安全に追加
+  try {
+    await db
+      .prepare(`ALTER TABLE lab_records ADD COLUMN record_type TEXT NOT NULL DEFAULT 'lab'`)
+      .run();
+  } catch {
+    // 既に存在する場合は無視
+  }
+  try {
+    await db
+      .prepare(`ALTER TABLE lab_records ADD COLUMN symptom_tags TEXT NOT NULL DEFAULT ''`)
+      .run();
+  } catch {
+    // 既に存在する場合は無視
+  }
+
   await db
     .prepare(
       `CREATE TABLE IF NOT EXISTS lab_items (
@@ -351,6 +477,51 @@ async function ensureD1Seeded(db: D1DatabaseLike): Promise<void> {
       )`
     )
     .run();
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT UNIQUE,
+        display_name TEXT NOT NULL DEFAULT 'ゲスト',
+        role TEXT NOT NULL DEFAULT 'owner' CHECK (role IN ('owner', 'member')),
+        plan_tier TEXT NOT NULL DEFAULT 'free' CHECK (plan_tier IN ('free', 'plus', 'pro')),
+        monthly_ocr_used INTEGER NOT NULL DEFAULT 0,
+        monthly_ocr_limit INTEGER NOT NULL DEFAULT 10,
+        terms_accepted_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`
+    )
+    .run();
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS auth_sessions (
+        id TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        csrf_token TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`
+    )
+    .run();
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS invitations (
+        token TEXT PRIMARY KEY,
+        created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        note TEXT NOT NULL DEFAULT '',
+        consumed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`
+    )
+    .run();
+}
+
+async function ensureD1Seeded(db: D1DatabaseLike): Promise<void> {
+  await ensureD1Schema(db);
 
   const defaultProfile = createDefaultProfile();
   await db
@@ -371,6 +542,14 @@ async function ensureD1Seeded(db: D1DatabaseLike): Promise<void> {
       defaultProfile.preferred_model,
       defaultProfile.updated_at || new Date().toISOString()
     )
+    .run();
+
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO users (id, email, display_name, role, plan_tier, monthly_ocr_used, monthly_ocr_limit)
+       VALUES (1, null, ?, 'owner', 'free', 1, 10)`
+    )
+    .bind(defaultProfile.name)
     .run();
 
   const countRow = await db.prepare('SELECT COUNT(*) as cnt FROM lab_records').first<{ cnt: number }>();
@@ -396,9 +575,30 @@ async function getProfileFromD1(db: D1DatabaseLike): Promise<UserProfile> {
     height_cm: Number(row.height_cm || 170),
     chronic_conditions: String(row.chronic_conditions || ''),
     medications: String(row.medications || ''),
-    preferred_provider: ((row.preferred_provider as AiProviderName) || 'gemini'),
+    preferred_provider: (row.preferred_provider as AiProviderName) || 'gemini',
     preferred_model: String(row.preferred_model || 'gemini-2.5-flash'),
     updated_at: String(row.updated_at || ''),
+  };
+}
+
+async function getAccountFromD1(
+  db: D1DatabaseLike,
+  profile: UserProfile,
+  env?: WorkerEnv
+): Promise<AccountSummary> {
+  const base = createDefaultAccount(profile, env);
+  const row = await db.prepare('SELECT * FROM users WHERE id = 1').first<Record<string, unknown>>();
+  if (!row) return base;
+  const tier = row.plan_tier;
+  const planTier: PlanTier = tier === 'plus' || tier === 'pro' ? tier : 'free';
+  return {
+    ...base,
+    email: row.email ? String(row.email) : null,
+    display_name: String(row.display_name || profile.name || 'サンプル利用者'),
+    plan_tier: planTier,
+    monthly_ocr_used: Number(row.monthly_ocr_used ?? 1),
+    monthly_ocr_limit: Number(row.monthly_ocr_limit ?? 10),
+    terms_accepted: Boolean(row.terms_accepted_at ?? true),
   };
 }
 
@@ -433,8 +633,13 @@ async function getRecordsFromD1(db: D1DatabaseLike): Promise<LabRecord[]> {
 
   return (recRes.results || []).map((r) => {
     const id = Number(r.id);
+    const items = itemsByRecordId.get(id) || [];
+    const recordType: RecordType =
+      r.record_type === 'daily' || (items.length === 0 && r.record_type !== 'lab') ? 'daily' : 'lab';
     return {
       id,
+      record_type: recordType,
+      symptom_tags: String(r.symptom_tags || ''),
       tested_at: String(r.tested_at || ''),
       facility_name: String(r.facility_name || ''),
       weight_kg: r.weight_kg !== null && r.weight_kg !== undefined ? Number(r.weight_kg) : null,
@@ -450,19 +655,25 @@ async function getRecordsFromD1(db: D1DatabaseLike): Promise<LabRecord[]> {
       ai_correlation: String(r.ai_correlation || ''),
       ai_advice: String(r.ai_advice || ''),
       created_at: String(r.created_at || ''),
-      items: itemsByRecordId.get(id) || [],
+      items,
     };
   });
 }
 
 async function insertRecordIntoD1(db: D1DatabaseLike, record: LabRecord): Promise<LabRecord> {
+  const recordType: RecordType =
+    record.record_type === 'daily' || (record.items || []).length === 0 ? 'daily' : 'lab';
+  const symptomTags = record.symptom_tags || '';
+
   const res = await db
     .prepare(
       `INSERT INTO lab_records
-       (tested_at, facility_name, weight_kg, overall_score, fatigue_score, sleep_score, pain_score, appetite_score, condition_note, ai_provider, ai_model, ai_summary, ai_correlation, ai_advice, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (record_type, symptom_tags, tested_at, facility_name, weight_kg, overall_score, fatigue_score, sleep_score, pain_score, appetite_score, condition_note, ai_provider, ai_model, ai_summary, ai_correlation, ai_advice, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
+      recordType,
+      symptomTags,
       record.tested_at,
       record.facility_name || '',
       record.weight_kg ?? null,
@@ -515,6 +726,8 @@ async function insertRecordIntoD1(db: D1DatabaseLike, record: LabRecord): Promis
   return {
     ...record,
     id: recordId,
+    record_type: recordType,
+    symptom_tags: symptomTags,
     items: savedItems,
   };
 }
@@ -522,21 +735,25 @@ async function insertRecordIntoD1(db: D1DatabaseLike, record: LabRecord): Promis
 async function getRepositoryData(env: WorkerEnv): Promise<{
   useD1: boolean;
   profile: UserProfile;
+  account: AccountSummary;
   records: LabRecord[];
 }> {
   if (env.DB) {
-    try {
-      await ensureD1Seeded(env.DB);
-      const profile = await getProfileFromD1(env.DB);
-      const records = await getRecordsFromD1(env.DB);
-      return { useD1: true, profile, records };
-    } catch {
-      // Fallback to in-memory store if D1 binding throws
-    }
+    await ensureD1Seeded(env.DB);
+    const profile = await getProfileFromD1(env.DB);
+    const account = await getAccountFromD1(env.DB, profile, env);
+    const records = await getRecordsFromD1(env.DB);
+    return { useD1: true, profile, account, records };
   }
+  const profile = { ...memoryStore.profile };
+  const account = {
+    ...createDefaultAccount(profile, env),
+    display_name: profile.name,
+  };
   return {
     useD1: false,
-    profile: { ...memoryStore.profile },
+    profile,
+    account,
     records: memoryStore.records.map((r) => ({ ...r, items: r.items.map((i) => ({ ...i })) })),
   };
 }
@@ -558,30 +775,140 @@ function recalculateRecordsForSex(records: LabRecord[], sex: BiologicalSex): Lab
   }));
 }
 
+function escapeCsvCell(val: unknown): string {
+  const s = String(val ?? '');
+  if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+export function buildRecordsCsv(records: LabRecord[]): string {
+  const headers = [
+    '日付',
+    '記録種別',
+    '医療機関・記録タイトル',
+    '体重(kg)',
+    '全体の調子(1-10)',
+    '元気さ(1-10)',
+    'からだの快適さ(1-10)',
+    '睡眠・休養(1-10)',
+    '食事・日常生活(1-10)',
+    '症状・出来事タグ',
+    'ひとこと日記',
+    '採血項目一覧',
+  ];
+
+  const rows = records.map((r) => {
+    const typeLabel = r.record_type === 'daily' || (r.items || []).length === 0 ? '体調日記' : '採血＋体調';
+    const itemsSummary = (r.items || [])
+      .map((i) => `${i.item_code}:${i.value}${i.unit}(${i.flag})`)
+      .join(' / ');
+    return [
+      r.tested_at,
+      typeLabel,
+      r.facility_name || (typeLabel === '体調日記' ? '日々の体調日記' : ''),
+      r.weight_kg ?? '',
+      r.overall_score,
+      r.fatigue_score,
+      r.pain_score,
+      r.sleep_score,
+      r.appetite_score,
+      r.symptom_tags || '',
+      r.condition_note || '',
+      itemsSummary,
+    ]
+      .map(escapeCsvCell)
+      .join(',');
+  });
+
+  return `\uFEFF${[headers.join(','), ...rows].join('\r\n')}\r\n`;
+}
+
+async function parseJsonBody<T>(
+  request: Request,
+  requestId: string,
+  route: string
+): Promise<{ data?: T; errorResponse?: Response }> {
+  const contentLength = Number(request.headers.get('content-length') || 0);
+  if (contentLength > MAX_JSON_BODY_BYTES) {
+    return {
+      errorResponse: createErrorResponse('PAYLOAD_TOO_LARGE', requestId, { route }),
+    };
+  }
+  try {
+    const rawText = await request.text();
+    if (rawText.length > MAX_JSON_BODY_BYTES) {
+      return {
+        errorResponse: createErrorResponse('PAYLOAD_TOO_LARGE', requestId, { route }),
+      };
+    }
+    if (!rawText.trim()) {
+      return {
+        errorResponse: createErrorResponse('REQUEST_INVALID', requestId, { route }),
+      };
+    }
+    const parsed = JSON.parse(rawText) as T;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return {
+        errorResponse: createErrorResponse('REQUEST_INVALID', requestId, { route }),
+      };
+    }
+    return { data: parsed };
+  } catch {
+    return {
+      errorResponse: createErrorResponse('REQUEST_INVALID', requestId, { route }),
+    };
+  }
+}
+
 export default {
   async fetch(request: Request, env: WorkerEnv = {}): Promise<Response> {
+    const requestId = request.headers.get('x-karada-request-id')?.trim() || generateRequestId();
+
     if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: CORS_HEADERS });
+      return finalizeResponse(new Response(null, { status: 204 }), requestId);
     }
 
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // 3段構え防御ゲート（/api/* へのアクセス時に手動メンテナンススイッチ・オートサーキットブレーカー・レート制限を評価）
+    if (path.startsWith('/api/')) {
+      const blocked = evaluateSecurityGate(request, env, requestId);
+      if (blocked) {
+        return blocked;
+      }
+    }
+
     try {
       // 1. GET /api/bootstrap
-      if (path === '/api/bootstrap' && request.method === 'GET') {
-        const { profile, records } = await getRepositoryData(env);
-        return jsonResponse({
-          profile,
-          records,
-          standards: REFERENCE_STANDARDS,
-          providers: SUPPORTED_PROVIDERS,
-        });
+      if (path === '/api/bootstrap') {
+        if (request.method !== 'GET') {
+          return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
+        }
+        const { profile, account, records } = await getRepositoryData(env);
+        return jsonResponse(
+          {
+            profile,
+            account,
+            records,
+            standards: REFERENCE_STANDARDS,
+            providers: SUPPORTED_PROVIDERS,
+          },
+          requestId
+        );
       }
 
       // 2. PUT /api/profile (also accept POST /api/profile)
-      if (path === '/api/profile' && (request.method === 'PUT' || request.method === 'POST')) {
-        const body = (await request.json()) as Partial<UserProfile>;
+      if (path === '/api/profile') {
+        if (request.method !== 'PUT' && request.method !== 'POST') {
+          return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
+        }
+        const parsed = await parseJsonBody<Partial<UserProfile>>(request, requestId, path);
+        if (parsed.errorResponse) return parsed.errorResponse;
+        const body = parsed.data!;
+
         const { useD1, profile: currentProfile } = await getRepositoryData(env);
 
         const validSex: BiologicalSex =
@@ -599,7 +926,12 @@ export default {
         const updated: UserProfile = {
           ...currentProfile,
           name: body.name !== undefined ? String(body.name).trim() || currentProfile.name : currentProfile.name,
-          birth_year: body.birth_year !== undefined ? (body.birth_year ? Number(body.birth_year) : null) : currentProfile.birth_year,
+          birth_year:
+            body.birth_year !== undefined
+              ? body.birth_year
+                ? Number(body.birth_year)
+                : null
+              : currentProfile.birth_year,
           age: body.age !== undefined ? Number(body.age) : currentProfile.age,
           sex: validSex,
           height_cm: body.height_cm !== undefined ? Number(body.height_cm) : currentProfile.height_cm,
@@ -635,17 +967,24 @@ export default {
         } else {
           const sexChanged = memoryStore.profile.sex !== updated.sex;
           memoryStore.profile = updated;
+          memoryStore.account.display_name = updated.name;
           if (sexChanged) {
             memoryStore.records = recalculateRecordsForSex(memoryStore.records, updated.sex);
           }
         }
 
-        return jsonResponse(updated);
+        return jsonResponse(updated, requestId);
       }
 
-      // 3. POST /api/records
-      if (path === '/api/records' && request.method === 'POST') {
-        const rawBody = (await request.json()) as Record<string, unknown>;
+      // 3. POST /api/records (supports both 'daily' wellness-only and 'lab' records)
+      if (path === '/api/records') {
+        if (request.method !== 'POST') {
+          return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
+        }
+        const parsed = await parseJsonBody<Record<string, unknown>>(request, requestId, path);
+        if (parsed.errorResponse) return parsed.errorResponse;
+        const rawBody = parsed.data!;
+
         const recordPayload = (rawBody.record ? rawBody.record : rawBody) as Partial<LabRecord> & {
           provider?: AiProviderName;
           model?: string;
@@ -679,15 +1018,31 @@ export default {
           )
           .filter((it) => !Number.isNaN(it.value));
 
+        const resolvedRecordType: RecordType =
+          normalizedItems.length === 0
+            ? 'daily'
+            : recordPayload.record_type === 'daily'
+              ? 'daily'
+              : 'lab';
+
+        const symptomTags = normalizeSymptomTags(recordPayload.symptom_tags);
+        const defaultFacility = resolvedRecordType === 'daily' ? '日々の体調日記' : '';
+
         const draftRecord: LabRecord = {
+          record_type: resolvedRecordType,
+          symptom_tags: symptomTags,
           tested_at:
             typeof recordPayload.tested_at === 'string' && recordPayload.tested_at.trim()
               ? recordPayload.tested_at.trim()
               : new Date().toISOString().slice(0, 10),
           facility_name:
-            typeof recordPayload.facility_name === 'string' ? recordPayload.facility_name.trim() : '',
+            typeof recordPayload.facility_name === 'string' && recordPayload.facility_name.trim()
+              ? recordPayload.facility_name.trim()
+              : defaultFacility,
           weight_kg:
-            recordPayload.weight_kg !== undefined && recordPayload.weight_kg !== null && String(recordPayload.weight_kg) !== ''
+            recordPayload.weight_kg !== undefined &&
+            recordPayload.weight_kg !== null &&
+            String(recordPayload.weight_kg) !== ''
               ? Number(recordPayload.weight_kg)
               : null,
           overall_score: clampScore(recordPayload.overall_score, 5),
@@ -723,7 +1078,7 @@ export default {
 
         if (useD1 && env.DB) {
           const saved = await insertRecordIntoD1(env.DB, draftRecord);
-          return jsonResponse(saved, 201);
+          return jsonResponse(saved, requestId, 201);
         }
 
         const recordId = memoryStore.nextRecordId++;
@@ -738,12 +1093,15 @@ export default {
         };
         memoryStore.records.push(savedRecord);
         memoryStore.records.sort((a, b) => b.tested_at.localeCompare(a.tested_at) || (b.id || 0) - (a.id || 0));
-        return jsonResponse(savedRecord, 201);
+        return jsonResponse(savedRecord, requestId, 201);
       }
 
       // 4. DELETE /api/records/:id
       const deleteMatch = path.match(/^\/api\/records\/(\d+)$/);
-      if (deleteMatch && request.method === 'DELETE') {
+      if (deleteMatch) {
+        if (request.method !== 'DELETE') {
+          return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
+        }
         const targetId = Number(deleteMatch[1]);
         const { useD1 } = await getRepositoryData(env);
 
@@ -754,12 +1112,15 @@ export default {
           memoryStore.records = memoryStore.records.filter((r) => r.id !== targetId);
         }
 
-        return jsonResponse({ deleted: true, id: targetId });
+        return jsonResponse({ deleted: true, id: targetId }, requestId);
       }
 
       // 5. POST /api/ocr
-      if (path === '/api/ocr' && request.method === 'POST') {
-        const body = (await request.json()) as {
+      if (path === '/api/ocr') {
+        if (request.method !== 'POST') {
+          return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
+        }
+        const parsed = await parseJsonBody<{
           imageBase64?: string;
           mimeType?: string;
           rawText?: string;
@@ -767,7 +1128,10 @@ export default {
           model?: string;
           apiKey?: string;
           sex?: BiologicalSex;
-        };
+        }>(request, requestId, path);
+        if (parsed.errorResponse) return parsed.errorResponse;
+        const body = parsed.data!;
+
         const { profile } = await getRepositoryData(env);
         const ocrResult = await extractLabFromOcr({
           imageBase64: body.imageBase64,
@@ -779,27 +1143,39 @@ export default {
           sex: body.sex || profile.sex,
           env,
         });
-        return jsonResponse(ocrResult);
+        return jsonResponse(ocrResult, requestId);
       }
 
       // 6. POST /api/analyze
-      if (path === '/api/analyze' && request.method === 'POST') {
-        const body = (await request.json()) as {
+      if (path === '/api/analyze') {
+        if (request.method !== 'POST') {
+          return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
+        }
+        const parsed = await parseJsonBody<{
           record: LabRecord;
           history?: LabRecord[];
           profile?: UserProfile;
           provider?: AiProviderName;
           model?: string;
           apiKey?: string;
-        };
+        }>(request, requestId, path);
+        if (parsed.errorResponse) return parsed.errorResponse;
+        const body = parsed.data!;
+
+        if (!body.record || typeof body.record !== 'object') {
+          return createErrorResponse('REQUEST_INVALID', requestId, { route: path });
+        }
 
         const repo = await getRepositoryData(env);
         const targetProfile = body.profile || repo.profile;
         const targetHistory = body.history || repo.records;
 
+        const normalizedItems = (body.record?.items || []).map((it) => normalizeLabItem(it, targetProfile.sex));
         const normalizedRecord: LabRecord = {
           ...body.record,
-          items: (body.record?.items || []).map((it) => normalizeLabItem(it, targetProfile.sex)),
+          record_type: normalizedItems.length === 0 ? 'daily' : body.record.record_type || 'lab',
+          symptom_tags: normalizeSymptomTags(body.record.symptom_tags),
+          items: normalizedItems,
         };
 
         const result = await analyzeLabAndWellness({
@@ -848,25 +1224,62 @@ export default {
           }
         }
 
-        return jsonResponse(result);
+        return jsonResponse(result, requestId);
+      }
+
+      // 7. GET /api/export/csv and GET /api/export/json
+      if (path === '/api/export/csv') {
+        if (request.method !== 'GET') {
+          return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
+        }
+        const { records } = await getRepositoryData(env);
+        const csvContent = buildRecordsCsv(records);
+        const raw = new Response(csvContent, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/csv; charset=utf-8',
+            'Content-Disposition': 'attachment; filename="karada-note-records.csv"',
+          },
+        });
+        return finalizeResponse(raw, requestId);
+      }
+
+      if (path === '/api/export/json') {
+        if (request.method !== 'GET') {
+          return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
+        }
+        const { profile, account, records } = await getRepositoryData(env);
+        return jsonResponse(
+          {
+            exported_at: new Date().toISOString(),
+            profile,
+            account,
+            records,
+          },
+          requestId
+        );
       }
 
       if (path.startsWith('/api/')) {
-        return jsonResponse({ error: `Not Found: ${request.method} ${path}` }, 404);
+        return createErrorResponse('ROUTE_NOT_FOUND', requestId, { route: path });
       }
 
-      // 7. Delegate non-API requests to Cloudflare static assets binding
+      // 8. Delegate non-API requests to Cloudflare static assets binding
       if (env.ASSETS && typeof env.ASSETS.fetch === 'function') {
-        return env.ASSETS.fetch(request);
+        const assetRes = await env.ASSETS.fetch(request);
+        return finalizeResponse(assetRes, requestId);
       }
 
-      return new Response('Lab Result Analyzer Worker is running.', {
+      const rootRes = new Response('からだノート Worker is running.', {
         status: 200,
         headers: { 'Content-Type': 'text/plain; charset=utf-8' },
       });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Internal Server Error';
-      return jsonResponse({ error: message }, 500);
+      return finalizeResponse(rootRes, requestId);
+    } catch {
+      // 内部エラー（DB例外等）発生時はサーキットブレーカーの失敗カウンタを進め、
+      // 生のエラーメッセージや患者データは一切出力せず ADR-030 固定エラーコードを返す
+      recordServerFailure();
+      return createErrorResponse('INTERNAL', requestId, { route: path });
     }
   },
 };
