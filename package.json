@@ -8,10 +8,11 @@
     "start": "ng serve",
     "build:web": "ng build --configuration production",
     "build": "npm run build:web",
-    "dev:worker": "wrangler dev",
-    "db:migrate:local": "CI=true wrangler d1 migrations apply lab-result-db --local",
-    "db:migrate:remote": "CI=true wrangler d1 migrations apply lab-result-db --remote",
-    "deploy": "npm run build:web && wrangler deploy",
+    "dev:worker": "node scripts/run-wrangler.mjs dev",
+    "cf:config": "bash scripts/set-cloudflare-config.sh",
+    "db:migrate:local": "CI=true node scripts/run-wrangler.mjs d1 migrations apply lab-result-db --local",
+    "db:migrate:remote": "CI=true node scripts/run-wrangler.mjs d1 migrations apply lab-result-db --remote",
+    "deploy": "npm run build:web && node scripts/run-wrangler.mjs deploy",
     "test": "node --experimental-strip-types --test tests/*.test.ts"
   },
   "dependencies": {
