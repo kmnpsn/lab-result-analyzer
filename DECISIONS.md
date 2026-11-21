@@ -52,3 +52,11 @@
   1. 全レスポンスへのセキュリティヘッダー（CSP, HSTS, `X-Frame-Options: DENY`, `nosniff`, `Permissions-Policy: camera=(self)`）付与。
   2. 手動メンテナンススイッチ（`MAINTENANCE_MODE=on`）および、短時間の連続内部エラー・過剰リクエスト検知時に自動で DB 接続を遮断するオート・サーキットブレーカー（`503 SERVICE_PAUSED` / `CIRCUIT_OPEN`）とクライアント待機画面（`ServicePauseGate`）。
   3. サーバーログ用の固定エラーコード（`x-karada-request-id` 付き、医療・症状データは一切ログに出さない）と、利用者向けの平易な日本語メッセージの完全分離。
+
+## ADR-008: 初回Owner登録・招待制・Google認証・各種SNSの後追い連携は外部Identity分離（`auth_identities`）で設計する
+- **日付:** 2026-11-22
+- **決定:**
+  - 詳細設計の正本を [`docs/production-login.md`](docs/production-login.md) とする（`kakeibo-app` の ADR-007 / ADR-026 を継承・発展）。
+  - **初回 Owner 登録**: `BOOTSTRAP_OWNER_EMAIL` により、管理者（`service_role='admin'`）不在の間だけ最初の Owner が招待なしで Google 登録できるようにする。
+  - **招待制**: 一般公開までは `REGISTRATION_MODE=invite_only` とし、Owner が発行した 1 回限り・期限つきの招待リンク（`/invite/<token>`）からのみ新規登録を許可する。招待された人には独立した `user_id` の手帳が作られる。
+  - **各種 SNS の後追い連携**: 内部の `users` と外部プロバイダの `auth_identities(provider, provider_subject, user_id)` を 1 対多で分離し、最初は Google で登録した利用者が、後から Apple ID / LINE / Yahoo! / Facebook / Amazon 等を自分のアカウントに追加連携できるようにする（メール一致だけでの自動統合は行わない）。

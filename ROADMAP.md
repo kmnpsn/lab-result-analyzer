@@ -35,10 +35,13 @@
 - **A-2 障害・サーキットブレーカー発火の把握**: ADR-030 の固定エラーコード（`CIRCUIT_OPEN`, `INTERNAL` 等）に基づくログ確認手順とメンテナンススイッチ運用手順の整備。
 - **A-3 費用の見張り**: Cloudflare Workers / D1 無料枠および AI API 利用量の月次確認手順。
 
-### Phase B：招待制のまま正式運用（マルチユーザー実接続）
-- **B-1 ログイン実接続（Google OAuth ＋ 招待リンク）**: すでに D1 に作成済みの `users` / `auth_sessions` / `invitations` テーブルを使い、Google OIDC ログイン＋招待リンクによる新規登録を接続し、すべての記録を `user_id`（所有者境界）で完全分離する。
-- **B-2 アカウントと健康データの自己削除**: 利用者自身が自分のアカウントと全記録を消去できる機能。
-- **B-3 診察用サマリー印刷 / PDF 出力**: 主治医に見せやすい 1 枚サマリー表示。
+### Phase B：招待制のまま正式運用（マルチユーザー実接続・設計正本: [`docs/production-login.md`](docs/production-login.md)）
+- **B-1 初回 Owner 登録（`BOOTSTRAP_OWNER_EMAIL`）と Google OIDC ログイン＋招待リンク（`/invite/:token`）**:
+  - 管理者不在時のみ `BOOTSTRAP_OWNER_EMAIL` で最初の Owner を招待なし登録し、2人目以降は Owner が発行する 1 回限りの招待 URL で登録する。すべての記録を `user_id`（所有者境界）で完全分離する。
+- **B-2 外部 Identity 分離（`auth_identities`）による SNS 後追い連携基盤**:
+  - Google で登録したあと、設定画面から Apple ID / LINE / Yahoo! / Facebook / Amazon 等を同じ `user_id` に追加連携できる仕組み。
+- **B-3 アカウントと健康データの自己削除**: 利用者自身が自分のアカウントと全記録を消去できる機能。
+- **B-4 診察用サマリー印刷 / PDF 出力**: 主治医に見せやすい 1 枚サマリー表示。
 
 ### Phase C：一般公開
 - **C-1 登録モード切替**: `REGISTRATION_MODE=invite_only` から `open` への切り替えと、利用規約・プライバシーポリシー同意ステップの必須化。

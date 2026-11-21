@@ -38,9 +38,11 @@
 - [ ] **診察時見せやすい「主治医共有用 1 枚サマリー」ビュー**: 直近 1〜3 か月の体調スコアの波・症状タグ回数・基準外だった採血項目をスマホ画面 1 枚（または印刷/PDF）でサッと見せられる表示
 - [ ] **日々の体調日記の編集（後から同日の記録を更新・採血項目を追記）導線の強化**
 
-### Phase B：招待制ログイン・マルチユーザー分離
-- [ ] **Google OAuth（OIDC）ログイン＋D1 セッション＋CSRF トークン自動更新の実接続**: `users` / `auth_sessions` / `invitations` テーブルと `lab_records.user_id` 境界の有効化
-- [ ] **招待リンク発行・管理 UI（Owner 専用）**: 家族やクローズドテスターを LINE 等で招待できる画面
+### Phase B：招待制ログイン・マルチユーザー分離・SNS後追い連携（詳細設計: [`docs/production-login.md`](docs/production-login.md)）
+- [ ] **`auth_identities` テーブルと所有者境界（`user_id`）のマイグレーション拡張**: 1人の内部 `users` に対して複数の外部認証（`google`, `apple`, `line`, `yahoo_japan`, `facebook`, `amazon`）を紐付けられる 1対多スキーマの適用
+- [ ] **初回 Owner ブートストラップ（`BOOTSTRAP_OWNER_EMAIL`）と Google OIDC ログイン（PKCE + D1 Session + CSRF）の実接続**
+- [ ] **招待リンク発行・受諾 UI/API（`/invite/:token`、Owner 専用、HMAC ハッシュ保存、1回限り）**
+- [ ] **各種 SNS アカウントの後追い連携 UI/API（`/api/auth/:provider/link`）**: ログイン済みユーザーが設定画面から LINE / Apple ID / Yahoo / Facebook / Amazon 等を追加連携・解除（最低1つは残すガード付き）できる機能
 - [ ] **アカウントと全記録の自己削除機能**
 
 ### Phase C / D：一般公開・外部認証拡張・有料プラン接続
