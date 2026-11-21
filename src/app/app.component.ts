@@ -25,6 +25,13 @@ import {
 
 type TabId = 'dashboard' | 'register' | 'detail' | 'settings';
 
+const TAB_THEME_COLORS: Record<TabId, string> = {
+  dashboard: '#0f766e', // ホーム・推移: ティールグリーン
+  register: '#c2410c',  // 記録・読取: オレンジ
+  detail: '#1d4ed8',    // 診断詳細: ブルー
+  settings: '#475569',  // 設定・持病: シルバーグレー
+};
+
 interface ChartLabPoint {
   index: number;
   x: number;
@@ -183,8 +190,60 @@ export class AppComponent implements OnInit {
 
       // 登録フォーム初期行（標準項目を3つだけ用意）
       this.initDefaultFormItems();
+      this.syncThemeColor();
     } finally {
       this.loading = false;
+    }
+  }
+
+  // ===== タブ切替 & スマホヘッダー操作 =====
+
+  selectTab(tab: TabId): void {
+    this.activeTab = tab;
+    this.syncThemeColor();
+  }
+
+  private syncThemeColor(): void {
+    if (typeof document === 'undefined') return;
+    const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+    if (meta) {
+      meta.content = TAB_THEME_COLORS[this.activeTab] || '#0f766e';
+    }
+  }
+
+  get headerDateLabel(): string {
+    const rec = this.selectedRecord ?? this.latestRecord;
+    if (!rec?.tested_at) return '記録なし';
+    const [y, m, d] = rec.tested_at.split('-');
+    if (!y || !m || !d) return rec.tested_at;
+    return `${y}年${Number(m)}月${Number(d)}日`;
+  }
+
+  get canPrevRecord(): boolean {
+    if (this.records.length <= 1) return false;
+    const current = this.selectedRecord ?? this.latestRecord;
+    if (!current) return false;
+    const idx = this.records.findIndex((r) => r.id === current.id);
+    return idx >= 0 && idx < this.records.length - 1;
+  }
+
+  get canNextRecord(): boolean {
+    if (this.records.length <= 1) return false;
+    const current = this.selectedRecord ?? this.latestRecord;
+    if (!current) return false;
+    const idx = this.records.findIndex((r) => r.id === current.id);
+    return idx > 0;
+  }
+
+  stepRecord(delta: -1 | 1): void {
+    if (this.records.length <= 1) return;
+    const current = this.selectedRecord ?? this.latestRecord;
+    if (!current) return;
+    const idx = this.records.findIndex((r) => r.id === current.id);
+    // records は新しい順（降順）なので、過去（前）は idx + 1、新しい方（次）は idx - 1
+    const nextIdx = delta < 0 ? idx + 1 : idx - 1;
+    if (nextIdx >= 0 && nextIdx < this.records.length) {
+      this.selectedRecordId = this.records[nextIdx].id ?? null;
     }
   }
 
@@ -473,7 +532,7 @@ export class AppComponent implements OnInit {
 
   openRecordDetail(record: LabRecord): void {
     this.selectedRecordId = record.id ?? null;
-    this.activeTab = 'detail';
+    this.selectTab('detail');
   }
 
   async deleteRecord(record: LabRecord, event?: Event): Promise<void> {
@@ -730,10 +789,10 @@ export class AppComponent implements OnInit {
       const saved = await this.api.createRecord(payload, this.records, this.profile, this.aiConfig);
       this.records = this.sortRecordsDesc([saved, ...this.records.filter((r) => r.id !== saved.id)]);
       this.selectedRecordId = saved.id ?? null;
-      this.activeTab = 'detail';
+      this.selectTab('detail');
       this.showToast('採血記録を保存し、AI 相関診断レポートを作成しました', 'success');
     } catch {
-      this.showToast('保存中にエラーが発生しました', 'error');
+      this.showToast('保存できませんでした。入力内容は画面に残っていますので、もう一度「保存」をお試しください。', 'error');
     } finally {
       this.saving = false;
     }

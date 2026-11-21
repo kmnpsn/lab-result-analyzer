@@ -1,6 +1,6 @@
-<div class="app-shell">
-  <!-- ===== ヘッダーバー ===== -->
-  <header class="top-header">
+<div class="app-shell" [attr.data-tab]="activeTab">
+  <!-- ===== ヘッダーバー（スマホ時はタブ別の背景色に全体が切り替わる） ===== -->
+  <header class="top-header" [attr.data-tab]="activeTab">
     <div class="header-main">
       <div class="brand">
         <div class="brand-icon" aria-hidden="true">
@@ -9,11 +9,12 @@
             <path d="M9.5 14.5h2l1-2.5 1.5 4 1-1.5h1.5" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
         </div>
-        <div>
+        <div class="brand-text-wrap">
           <div class="brand-title-row">
-            <h1>採血結果診断 &amp; 体調相関アナライザー</h1>
+            <h1 class="desktop-title">採血結果診断 &amp; 体調相関アナライザー</h1>
+            <h1 class="mobile-title">採血・体調管理</h1>
             <span class="mode-pill" [class.offline]="api.isOffline">
-              {{ api.isOffline ? 'ローカルモード' : 'API 接続中' }}
+              {{ api.isOffline ? 'ローカル' : '同期中' }}
             </span>
           </div>
           <div class="profile-summary">
@@ -28,6 +29,42 @@
           </div>
         </div>
       </div>
+
+      <!-- スマホ用: ヘッダー右側の日付送りコントロール（家計簿アプリ流） -->
+      @if (records.length > 0) {
+        <div class="mobile-date-stepper" aria-label="採血日の切り替え">
+          <button
+            type="button"
+            class="stepper-btn"
+            [disabled]="!canPrevRecord"
+            (click)="stepRecord(-1)"
+            aria-label="前の採血日"
+          >
+            ◀
+          </button>
+          <label class="stepper-label">
+            <span>{{ headerDateLabel }}</span>
+            <select
+              aria-label="表示する採血日を選択"
+              class="stepper-native-select"
+              [(ngModel)]="selectedRecordId"
+            >
+              @for (r of records; track r.id ?? r.tested_at) {
+                <option [ngValue]="r.id">{{ r.tested_at }} ({{ r.facility_name }})</option>
+              }
+            </select>
+          </label>
+          <button
+            type="button"
+            class="stepper-btn"
+            [disabled]="!canNextRecord"
+            (click)="stepRecord(1)"
+            aria-label="次の採血日"
+          >
+            ▶
+          </button>
+        </div>
+      }
 
       <div class="provider-switcher" aria-label="AIプロバイダ切替">
         <span class="switcher-label">AIプロバイダ:</span>
@@ -51,7 +88,7 @@
         role="tab"
         class="tab-btn"
         [class.active]="activeTab === 'dashboard'"
-        (click)="activeTab = 'dashboard'"
+        (click)="selectTab('dashboard')"
       >
         📊 ダッシュボード &amp; 相関グラフ
       </button>
@@ -60,7 +97,7 @@
         role="tab"
         class="tab-btn"
         [class.active]="activeTab === 'register'"
-        (click)="activeTab = 'register'"
+        (click)="selectTab('register')"
       >
         ➕ 採血結果の登録（OCR / 手入力）
       </button>
@@ -69,7 +106,7 @@
         role="tab"
         class="tab-btn"
         [class.active]="activeTab === 'detail'"
-        (click)="activeTab = 'detail'"
+        (click)="selectTab('detail')"
       >
         🩺 採血詳細 &amp; AI 相関診断
       </button>
@@ -78,7 +115,7 @@
         role="tab"
         class="tab-btn"
         [class.active]="activeTab === 'settings'"
-        (click)="activeTab = 'settings'"
+        (click)="selectTab('settings')"
       >
         ⚙️ プロフィール・持病・AI設定
       </button>
@@ -140,7 +177,7 @@
             <div class="kpi-label">蓄積された採血履歴</div>
             <div class="kpi-value">{{ records.length }} 回</div>
             <div class="kpi-sub">
-              <button type="button" class="link-btn" (click)="activeTab = 'register'">
+              <button type="button" class="link-btn" (click)="selectTab('register')">
                 ＋ 新しい採血結果を登録
               </button>
             </div>
@@ -504,12 +541,25 @@
                   hidden
                   (change)="onFileSelected($event)"
                 />
+                <input
+                  #cameraInput
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  hidden
+                  (change)="onFileSelected($event)"
+                />
                 <div class="dropzone-icon">📄</div>
-                <p class="dropzone-title">画像または PDF をドラッグ＆ドロップ</p>
+                <p class="dropzone-title">結果用紙の写真または PDF を読み取る</p>
                 <p class="dropzone-sub">PNG / JPG / PDF 対応（{{ providerMeta[aiConfig.provider].label }} Vision OCR）</p>
-                <button type="button" class="btn-primary" [disabled]="ocrLoading" (click)="fileInput.click()">
-                  {{ ocrLoading ? '読み取り中...' : 'ファイルを選択' }}
-                </button>
+                <div class="dropzone-btn-row">
+                  <button type="button" class="btn-primary" [disabled]="ocrLoading" (click)="cameraInput.click()">
+                    📷 カメラで撮影
+                  </button>
+                  <button type="button" class="btn-secondary" [disabled]="ocrLoading" (click)="fileInput.click()">
+                    {{ ocrLoading ? '読み取り中...' : '📁 ファイルを選択' }}
+                  </button>
+                </div>
                 @if (ocrFileName) {
                   <div class="file-name-pill">選択中: {{ ocrFileName }}</div>
                 }
@@ -656,7 +706,8 @@
               </div>
             </div>
 
-            <div class="table-scroll">
+            <!-- PC用テーブル表示 -->
+            <div class="table-scroll desktop-only-table">
               <table class="lab-edit-table">
                 <thead>
                   <tr>
@@ -719,6 +770,64 @@
                   }
                 </tbody>
               </table>
+            </div>
+
+            <!-- スマホ用 3行カードリスト（文字切れ・横スクロールなし） -->
+            <div class="mobile-only-cards">
+              @for (item of formItems; track $index) {
+                <div class="mobile-item-card">
+                  <div class="m-card-row1">
+                    <input
+                      type="text"
+                      [(ngModel)]="item.item_name"
+                      class="m-name-input"
+                      placeholder="項目名"
+                    />
+                    <span class="flag-badge" [ngClass]="'flag-' + item.flag">{{ item.flag }}</span>
+                    <button type="button" class="icon-danger-btn" (click)="removeFormItem($index)">削除</button>
+                  </div>
+                  <div class="m-card-row2">
+                    <div class="m-field">
+                      <span class="m-sub-label">測定値</span>
+                      <input
+                        type="number"
+                        step="any"
+                        [(ngModel)]="item.value"
+                        (ngModelChange)="recomputeItemFlag(item)"
+                      />
+                    </div>
+                    <div class="m-field short">
+                      <span class="m-sub-label">単位</span>
+                      <input type="text" [(ngModel)]="item.unit" />
+                    </div>
+                    <div class="m-field short">
+                      <span class="m-sub-label">略称</span>
+                      <input type="text" [(ngModel)]="item.item_code" />
+                    </div>
+                  </div>
+                  <div class="m-card-row3">
+                    <div class="m-field">
+                      <span class="m-sub-label">基準下限</span>
+                      <input
+                        type="number"
+                        step="any"
+                        [(ngModel)]="item.ref_low"
+                        (ngModelChange)="recomputeItemFlag(item)"
+                      />
+                    </div>
+                    <span class="m-range-sep">〜</span>
+                    <div class="m-field">
+                      <span class="m-sub-label">基準上限</span>
+                      <input
+                        type="number"
+                        step="any"
+                        [(ngModel)]="item.ref_high"
+                        (ngModelChange)="recomputeItemFlag(item)"
+                      />
+                    </div>
+                  </div>
+                </div>
+              }
             </div>
 
             <div class="submit-bar">
@@ -1045,7 +1154,7 @@
             </div>
           </div>
 
-          <div class="table-scroll">
+          <div class="table-scroll desktop-only-table">
             <table class="standards-table">
               <thead>
                 <tr>
@@ -1074,8 +1183,80 @@
               </tbody>
             </table>
           </div>
+
+          <!-- スマホ用 2〜3行カード表示（文字切れなし） -->
+          <div class="mobile-only-cards">
+            @for (std of standards; track std.code) {
+              <div class="mobile-std-card">
+                <div class="m-std-top">
+                  <strong>{{ std.name }}</strong>
+                  <span class="meta-chip">{{ std.category }}</span>
+                </div>
+                <div class="m-std-range">
+                  基準範囲（{{ getSexLabel(profileForm.sex) }}）:
+                  <strong>
+                    {{ getStandardRangeForSex(std, profileForm.sex)[0] }} 〜
+                    {{ getStandardRangeForSex(std, profileForm.sex)[1] }} {{ std.unit }}
+                  </strong>
+                </div>
+                <div class="m-std-desc">{{ std.description }}</div>
+              </div>
+            }
+          </div>
         </section>
       }
     }
+
+    <footer class="app-footer">
+      <span>© 2026 TakTech</span>
+    </footer>
   </main>
+
+  <!-- ===== スマホ専用: 下部固定ボトムタブバー（家計簿アプリ流） ===== -->
+  <nav class="bottom-tab-bar" [attr.data-tab]="activeTab" aria-label="メインメニュー">
+    <button
+      type="button"
+      class="bottom-tab-item"
+      data-tab="dashboard"
+      [class.active]="activeTab === 'dashboard'"
+      (click)="selectTab('dashboard')"
+    >
+      <span class="bottom-tab-indicator"></span>
+      <span class="bottom-tab-icon" aria-hidden="true">📊</span>
+      <span class="bottom-tab-label">ホーム</span>
+    </button>
+    <button
+      type="button"
+      class="bottom-tab-item"
+      data-tab="register"
+      [class.active]="activeTab === 'register'"
+      (click)="selectTab('register')"
+    >
+      <span class="bottom-tab-indicator"></span>
+      <span class="bottom-tab-icon" aria-hidden="true">📷</span>
+      <span class="bottom-tab-label">記録</span>
+    </button>
+    <button
+      type="button"
+      class="bottom-tab-item"
+      data-tab="detail"
+      [class.active]="activeTab === 'detail'"
+      (click)="selectTab('detail')"
+    >
+      <span class="bottom-tab-indicator"></span>
+      <span class="bottom-tab-icon" aria-hidden="true">🩺</span>
+      <span class="bottom-tab-label">診断</span>
+    </button>
+    <button
+      type="button"
+      class="bottom-tab-item"
+      data-tab="settings"
+      [class.active]="activeTab === 'settings'"
+      (click)="selectTab('settings')"
+    >
+      <span class="bottom-tab-indicator"></span>
+      <span class="bottom-tab-icon" aria-hidden="true">⚙️</span>
+      <span class="bottom-tab-label">設定</span>
+    </button>
+  </nav>
 </div>

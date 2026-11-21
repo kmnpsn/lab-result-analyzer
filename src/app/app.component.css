@@ -2,6 +2,52 @@
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  --tab-accent: #0f766e;
+}
+
+.app-shell[data-tab='dashboard'],
+.top-header[data-tab='dashboard'],
+.bottom-tab-item[data-tab='dashboard'] {
+  --tab-accent: #0f766e;
+}
+
+.app-shell[data-tab='register'],
+.top-header[data-tab='register'],
+.bottom-tab-item[data-tab='register'] {
+  --tab-accent: #c2410c;
+}
+
+.app-shell[data-tab='detail'],
+.top-header[data-tab='detail'],
+.bottom-tab-item[data-tab='detail'] {
+  --tab-accent: #1d4ed8;
+}
+
+.app-shell[data-tab='settings'],
+.top-header[data-tab='settings'],
+.bottom-tab-item[data-tab='settings'] {
+  --tab-accent: #475569;
+}
+
+.mobile-title,
+.mobile-date-stepper,
+.mobile-only-cards,
+.bottom-tab-bar {
+  display: none;
+}
+
+.dropzone-btn-row {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.app-footer {
+  text-align: center;
+  padding: 1.2rem 0 0.5rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
 }
 
 /* ===== Header ===== */
@@ -1229,16 +1275,304 @@ button:disabled {
   color: var(--text-muted);
 }
 
-@media (max-width: 720px) {
+@media (max-width: 768px) {
+  .desktop-title,
+  .tab-nav,
+  .desktop-only-table,
+  .panel-desc {
+    display: none !important;
+  }
+
+  .mobile-title {
+    display: inline;
+    font-size: 1.05rem !important;
+    color: #ffffff;
+  }
+
+  /* 家計簿アプリ流: 選択中タブの色でヘッダー帯全体を塗る */
   .top-header {
-    padding: 0.75rem 0.9rem 0;
+    background: var(--tab-accent);
+    border-bottom: 2px solid rgba(255, 255, 255, 0.22);
+    padding: 0.55rem 0.85rem;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  }
+
+  .header-main {
+    margin: 0 auto;
+    gap: 0.5rem;
+  }
+
+  .brand {
+    gap: 0.55rem;
+  }
+
+  .brand-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.18);
+    border-color: rgba(255, 255, 255, 0.65);
+    color: #ffffff;
+  }
+
+  .profile-summary {
+    display: none;
+  }
+
+  .provider-switcher {
+    width: 100%;
+    justify-content: flex-start;
+    padding-top: 0.25rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.16);
+  }
+
+  .switcher-label {
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 0.72rem;
+  }
+
+  .provider-badge {
+    padding: 0.22rem 0.55rem;
+    font-size: 0.74rem;
+    background: rgba(15, 23, 42, 0.35);
+    border-color: rgba(255, 255, 255, 0.35);
+    color: rgba(255, 255, 255, 0.9);
+  }
+
+  .provider-badge.active {
+    background: #ffffff;
+    border-color: #ffffff;
+    color: #0f172a;
+  }
+
+  /* ヘッダー右側の採血日ステッパー */
+  .mobile-date-stepper {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin-left: auto;
+  }
+
+  .stepper-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.55);
+    background: rgba(255, 255, 255, 0.15);
+    color: #ffffff;
+    font-size: 0.78rem;
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .stepper-btn:disabled {
+    opacity: 0.35;
+  }
+
+  .stepper-label {
+    position: relative;
+    min-height: 36px;
+    padding: 0 0.5rem;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: #ffffff;
+    white-space: nowrap;
+  }
+
+  .stepper-native-select {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    cursor: pointer;
   }
 
   .main-content {
-    padding: 1rem 0.9rem 2.5rem;
+    padding: 0.85rem 0.75rem calc(5.2rem + env(safe-area-inset-bottom));
+    gap: 0.9rem;
+  }
+
+  .panel {
+    padding: 0.95rem 0.9rem;
+  }
+
+  .kpi-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.65rem;
+  }
+
+  .kpi-card {
+    padding: 0.75rem 0.85rem;
+  }
+
+  .kpi-value {
+    font-size: 1.1rem;
   }
 
   .gauge-row {
     grid-template-columns: 1fr;
+    gap: 0.6rem;
+  }
+
+  /* 文字切れゼロのモバイル用 2〜3行カード */
+  .mobile-only-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .mobile-item-card,
+  .mobile-std-card {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+
+  .m-card-row1 {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .m-name-input {
+    flex: 1;
+    min-width: 0;
+    font-weight: 600;
+  }
+
+  .m-card-row2,
+  .m-card-row3 {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .m-field {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .m-field.short {
+    flex: 0.75;
+  }
+
+  .m-sub-label {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+  }
+
+  .m-range-sep {
+    padding-top: 1rem;
+    color: var(--text-muted);
+  }
+
+  .m-std-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    font-size: 0.9rem;
+  }
+
+  .m-std-range {
+    font-size: 0.82rem;
+    color: #e2e8f0;
+  }
+
+  .m-std-desc {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+  }
+
+  .submit-bar {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+
+  .submit-bar button {
+    width: 100%;
+  }
+
+  .toast {
+    left: 0.75rem;
+    right: 0.75rem;
+    bottom: calc(4.6rem + env(safe-area-inset-bottom));
+    max-width: none;
+  }
+
+  /* スマホ下部固定ボトムタブバー（家計簿アプリ流） */
+  .bottom-tab-bar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 40;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    background: #0f172a;
+    border-top: 1px solid var(--border);
+    padding-bottom: env(safe-area-inset-bottom);
+    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.45);
+  }
+
+  .bottom-tab-item {
+    position: relative;
+    height: 3.8rem;
+    border: none;
+    background: transparent;
+    color: #94a3b8;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.18rem;
+    padding: 0.25rem;
+    font-size: 0.74rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .bottom-tab-indicator {
+    position: absolute;
+    left: 18%;
+    right: 18%;
+    top: 0;
+    height: 4px;
+    border-radius: 0 0 999px 999px;
+    background: transparent;
+  }
+
+  .bottom-tab-item.active {
+    color: #ffffff;
+    font-weight: 700;
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .bottom-tab-item.active .bottom-tab-indicator {
+    background: var(--tab-accent);
+  }
+
+  .bottom-tab-icon {
+    font-size: 1.15rem;
+    line-height: 1;
+  }
+
+  .bottom-tab-label {
+    line-height: 1.1;
   }
 }
