@@ -1,0 +1,1081 @@
+<div class="app-shell">
+  <!-- ===== ヘッダーバー ===== -->
+  <header class="top-header">
+    <div class="header-main">
+      <div class="brand">
+        <div class="brand-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2.5C12 2.5 6 9.5 6 14a6 6 0 0 0 12 0c0-4.5-6-11.5-6-11.5Z" />
+            <path d="M9.5 14.5h2l1-2.5 1.5 4 1-1.5h1.5" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </div>
+        <div>
+          <div class="brand-title-row">
+            <h1>採血結果診断 &amp; 体調相関アナライザー</h1>
+            <span class="mode-pill" [class.offline]="api.isOffline">
+              {{ api.isOffline ? 'ローカルモード' : 'API 接続中' }}
+            </span>
+          </div>
+          <div class="profile-summary">
+            <span>{{ profile.name || 'ゲスト' }}</span>
+            <span class="dot">•</span>
+            <span>{{ profile.age }}歳 / {{ getSexLabel(profile.sex) }}</span>
+            <span class="dot">•</span>
+            <span>{{ profile.height_cm }}cm / BMI {{ bmi }}</span>
+            @for (tag of chronicTags; track tag) {
+              <span class="condition-tag">{{ tag }}</span>
+            }
+          </div>
+        </div>
+      </div>
+
+      <div class="provider-switcher" aria-label="AIプロバイダ切替">
+        <span class="switcher-label">AIプロバイダ:</span>
+        @for (p of providers; track p) {
+          <button
+            type="button"
+            class="provider-badge"
+            [class.active]="aiConfig.provider === p"
+            (click)="switchProviderQuick(p)"
+          >
+            <span class="provider-dot" [style.background]="providerMeta[p].color"></span>
+            {{ providerMeta[p].label }}
+          </button>
+        }
+      </div>
+    </div>
+
+    <nav class="tab-nav" role="tablist">
+      <button
+        type="button"
+        role="tab"
+        class="tab-btn"
+        [class.active]="activeTab === 'dashboard'"
+        (click)="activeTab = 'dashboard'"
+      >
+        📊 ダッシュボード &amp; 相関グラフ
+      </button>
+      <button
+        type="button"
+        role="tab"
+        class="tab-btn"
+        [class.active]="activeTab === 'register'"
+        (click)="activeTab = 'register'"
+      >
+        ➕ 採血結果の登録（OCR / 手入力）
+      </button>
+      <button
+        type="button"
+        role="tab"
+        class="tab-btn"
+        [class.active]="activeTab === 'detail'"
+        (click)="activeTab = 'detail'"
+      >
+        🩺 採血詳細 &amp; AI 相関診断
+      </button>
+      <button
+        type="button"
+        role="tab"
+        class="tab-btn"
+        [class.active]="activeTab === 'settings'"
+        (click)="activeTab = 'settings'"
+      >
+        ⚙️ プロフィール・持病・AI設定
+      </button>
+    </nav>
+  </header>
+
+  @if (toastMessage) {
+    <div class="toast" [class]="'toast ' + toastType">
+      {{ toastMessage }}
+    </div>
+  }
+
+  <main class="main-content">
+    @if (loading) {
+      <div class="loading-card">データを読み込み中...</div>
+    } @else {
+      <!-- ===== タブ 1: ダッシュボード & 採血×体調10段階 相関グラフ ===== -->
+      @if (activeTab === 'dashboard') {
+        <section class="kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-label">最新の採血日</div>
+            <div class="kpi-value">{{ latestRecord?.tested_at || '未登録' }}</div>
+            <div class="kpi-sub">
+              @if (latestRecord) {
+                基準外項目: <strong>{{ getAbnormalItems(latestRecord).length }}件</strong> / 全{{ latestRecord.items.length }}項目
+              } @else {
+                採血結果を登録してください
+              }
+            </div>
+          </div>
+
+          <div class="kpi-card">
+            <div class="kpi-label">最新の総合体調スコア</div>
+            <div class="kpi-value">
+              @if (latestRecord) {
+                <span class="score-pill large" [ngClass]="getScoreClass(latestRecord.overall_score)">
+                  {{ latestRecord.overall_score }} / 10
+                </span>
+              } @else {
+                --
+              }
+            </div>
+            <div class="kpi-sub">
+              @if (latestRecord) {
+                活力 {{ latestRecord.fatigue_score }} / 睡眠 {{ latestRecord.sleep_score }} / 痛み少 {{ latestRecord.pain_score }}
+              }
+            </div>
+          </div>
+
+          <div class="kpi-card">
+            <div class="kpi-label">最新体重 / BMI</div>
+            <div class="kpi-value">
+              {{ latestRecord?.weight_kg != null ? latestRecord!.weight_kg + ' kg' : '--' }}
+            </div>
+            <div class="kpi-sub">身長 {{ profile.height_cm }} cm / BMI {{ bmi }}</div>
+          </div>
+
+          <div class="kpi-card">
+            <div class="kpi-label">蓄積された採血履歴</div>
+            <div class="kpi-value">{{ records.length }} 回</div>
+            <div class="kpi-sub">
+              <button type="button" class="link-btn" (click)="activeTab = 'register'">
+                ＋ 新しい採血結果を登録
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- 2軸オーバーレイ SVG チャート -->
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>採血値 × 体調10段階スコア 2軸相関チャート</h2>
+              <p class="panel-desc">
+                左軸に採血項目の推移と性別基準値帯（緑）、右軸（1〜10）に主観体調スコアと体重推移を重ねて可視化します。
+              </p>
+            </div>
+            <div class="chart-select-wrap">
+              <label for="chartItemSelect">表示項目:</label>
+              <select id="chartItemSelect" [(ngModel)]="selectedChartCode">
+                @for (opt of availableChartCodes; track opt.code) {
+                  <option [value]="opt.code">{{ opt.code }} - {{ opt.name }}</option>
+                }
+              </select>
+            </div>
+          </div>
+
+          <div class="quick-chips">
+            @for (code of quickChartCodes; track code) {
+              <button
+                type="button"
+                class="chip-btn"
+                [class.active]="selectedChartCode === code"
+                (click)="selectedChartCode = code"
+              >
+                {{ code }}
+              </button>
+            }
+          </div>
+
+          <div class="overlay-toggles">
+            <span class="toggle-group-label">右軸オーバーレイ:</span>
+            @for (m of wellnessMetrics; track m.key) {
+              <label class="checkbox-pill">
+                <input type="checkbox" [(ngModel)]="wellnessSelection[m.key]" />
+                <span class="swatch" [style.background]="m.color"></span>
+                {{ m.shortLabel }}
+              </label>
+            }
+            <label class="checkbox-pill">
+              <input type="checkbox" [(ngModel)]="showWeightOverlay" />
+              <span class="swatch weight-swatch"></span>
+              体重 (kg)
+            </label>
+          </div>
+
+          @if (records.length === 0) {
+            <div class="empty-state">採血記録がありません。「採血結果の登録」タブから登録してください。</div>
+          } @else {
+            <div class="chart-container">
+              <svg
+                class="correlation-svg"
+                [attr.viewBox]="'0 0 ' + chartModel.width + ' ' + chartModel.height"
+                preserveAspectRatio="xMidYMid meet"
+              >
+                <!-- グリッド線 -->
+                @for (tick of chartModel.leftTicks; track tick.y) {
+                  <line
+                    [attr.x1]="chartModel.plotLeft"
+                    [attr.x2]="chartModel.plotRight"
+                    [attr.y1]="tick.y"
+                    [attr.y2]="tick.y"
+                    stroke="rgba(148,163,184,0.14)"
+                    stroke-dasharray="3 3"
+                  />
+                  <text
+                    [attr.x]="chartModel.plotLeft - 8"
+                    [attr.y]="tick.y + 4"
+                    text-anchor="end"
+                    class="axis-text"
+                  >
+                    {{ tick.label }}
+                  </text>
+                }
+
+                <!-- 基準値帯（緑） -->
+                @if (chartModel.refBandY !== null && chartModel.refBandH !== null) {
+                  <rect
+                    [attr.x]="chartModel.plotLeft"
+                    [attr.y]="chartModel.refBandY"
+                    [attr.width]="chartModel.plotRight - chartModel.plotLeft"
+                    [attr.height]="chartModel.refBandH"
+                    fill="rgba(52, 211, 153, 0.14)"
+                  />
+                  @if (chartModel.refHighY !== null) {
+                    <line
+                      [attr.x1]="chartModel.plotLeft"
+                      [attr.x2]="chartModel.plotRight"
+                      [attr.y1]="chartModel.refHighY"
+                      [attr.y2]="chartModel.refHighY"
+                      stroke="rgba(52, 211, 153, 0.5)"
+                      stroke-dasharray="4 4"
+                    />
+                  }
+                  @if (chartModel.refLowY !== null) {
+                    <line
+                      [attr.x1]="chartModel.plotLeft"
+                      [attr.x2]="chartModel.plotRight"
+                      [attr.y1]="chartModel.refLowY"
+                      [attr.y2]="chartModel.refLowY"
+                      stroke="rgba(52, 211, 153, 0.5)"
+                      stroke-dasharray="4 4"
+                    />
+                  }
+                }
+
+                <!-- 右軸ラベル (1〜10) -->
+                @for (tick of chartModel.rightTicks; track tick.label) {
+                  <text
+                    [attr.x]="chartModel.plotRight + 8"
+                    [attr.y]="tick.y + 4"
+                    text-anchor="start"
+                    class="axis-text right-axis"
+                  >
+                    {{ tick.label }}
+                  </text>
+                }
+
+                <!-- 軸タイトル -->
+                <text [attr.x]="chartModel.plotLeft" [attr.y]="14" class="axis-title">
+                  {{ chartModel.itemName }} ({{ chartModel.unit }})
+                </text>
+                <text [attr.x]="chartModel.plotRight" [attr.y]="14" text-anchor="end" class="axis-title right-axis">
+                  体調スコア (1-10)
+                </text>
+
+                <!-- X軸日付 -->
+                @for (xl of chartModel.xLabels; track xl.index) {
+                  <text
+                    [attr.x]="xl.x"
+                    [attr.y]="chartModel.plotBottom + 22"
+                    text-anchor="middle"
+                    class="axis-text"
+                  >
+                    {{ xl.label }}
+                  </text>
+                }
+
+                <!-- 体重オーバーレイ -->
+                @if (showWeightOverlay && chartModel.weightPoints.length > 0) {
+                  <polyline
+                    [attr.points]="chartModel.weightPolyline"
+                    fill="none"
+                    stroke="#94a3b8"
+                    stroke-width="1.8"
+                    stroke-dasharray="6 4"
+                  />
+                  @for (wp of chartModel.weightPoints; track wp.date) {
+                    <rect
+                      [attr.x]="wp.x - 3.5"
+                      [attr.y]="wp.y - 3.5"
+                      width="7"
+                      height="7"
+                      fill="#94a3b8"
+                      rx="1"
+                    />
+                  }
+                }
+
+                <!-- 体調スコア折れ線 -->
+                @for (series of chartModel.wellnessSeries; track series.key) {
+                  <polyline
+                    [attr.points]="series.polyline"
+                    fill="none"
+                    [attr.stroke]="series.color"
+                    stroke-width="2"
+                    stroke-dasharray="4 2"
+                    opacity="0.9"
+                  />
+                  @for (pt of series.points; track pt.date) {
+                    <circle [attr.cx]="pt.x" [attr.cy]="pt.y" r="3.6" [attr.fill]="series.color" />
+                  }
+                }
+
+                <!-- 採血項目メイン折れ線 -->
+                @if (chartModel.labPoints.length > 0) {
+                  <polyline
+                    [attr.points]="chartModel.labPolyline"
+                    fill="none"
+                    stroke="#38bdf8"
+                    stroke-width="3"
+                    stroke-linejoin="round"
+                  />
+                  @for (pt of chartModel.labPoints; track pt.index) {
+                    <g
+                      class="chart-point-group"
+                      (mouseenter)="hoveredPointIndex = pt.index"
+                      (mouseleave)="hoveredPointIndex = null"
+                      (click)="openRecordDetail(pt.record)"
+                    >
+                      <circle
+                        [attr.cx]="pt.x"
+                        [attr.cy]="pt.y"
+                        r="14"
+                        fill="transparent"
+                      />
+                      <circle
+                        [attr.cx]="pt.x"
+                        [attr.cy]="pt.y"
+                        r="5.8"
+                        [attr.fill]="pt.flag === 'H' ? '#f87171' : pt.flag === 'L' ? '#60a5fa' : '#34d399'"
+                        stroke="#0b1120"
+                        stroke-width="2"
+                      />
+                      <text [attr.x]="pt.x" [attr.y]="pt.y - 11" text-anchor="middle" class="point-label">
+                        {{ pt.value }}
+                      </text>
+                    </g>
+                  }
+                }
+              </svg>
+
+              @if (hoveredRecord) {
+                <div class="chart-tooltip">
+                  <div class="tooltip-head">
+                    <strong>{{ hoveredRecord.tested_at }}</strong>
+                    <span>{{ hoveredRecord.facility_name }}</span>
+                  </div>
+                  <div class="tooltip-grid">
+                    @if (getHoveredLabItem(); as hi) {
+                      <div>
+                        {{ hi.item_code }}:
+                        <strong>{{ hi.value }} {{ hi.unit }}</strong>
+                        <span class="flag-badge" [ngClass]="'flag-' + hi.flag">{{ hi.flag }}</span>
+                      </div>
+                    }
+                    <div>総合体調: <strong>{{ hoveredRecord.overall_score }}/10</strong></div>
+                    <div>活力: <strong>{{ hoveredRecord.fatigue_score }}/10</strong></div>
+                    <div>睡眠: <strong>{{ hoveredRecord.sleep_score }}/10</strong></div>
+                    <div>痛み少: <strong>{{ hoveredRecord.pain_score }}/10</strong></div>
+                    <div>体重: <strong>{{ hoveredRecord.weight_kg ?? '--' }} kg</strong></div>
+                  </div>
+                  @if (hoveredRecord.condition_note) {
+                    <div class="tooltip-note">{{ hoveredRecord.condition_note }}</div>
+                  }
+                </div>
+              }
+            </div>
+
+            <!-- 相関インサイトカード -->
+            <div class="insight-box">
+              <div class="insight-head">
+                <span class="insight-title">🔎 相関インサイト（{{ chartModel.itemName }} × 体調スコア）</span>
+                <div class="insight-badges">
+                  <span class="insight-badge">
+                    相関係数 r = {{ correlationInsight.rOverall !== null ? correlationInsight.rOverall.toFixed(2) : '--' }}
+                  </span>
+                  <span class="insight-badge accent">{{ correlationInsight.strengthLabel }}</span>
+                  @if (chartModel.refLow !== null && chartModel.refHigh !== null) {
+                    <span class="insight-badge normal">
+                      基準値({{ getSexLabel(profile.sex) }}): {{ chartModel.refLow }} 〜 {{ chartModel.refHigh }} {{ chartModel.unit }}
+                    </span>
+                  }
+                </div>
+              </div>
+              <p class="insight-text">{{ correlationInsight.comment }}</p>
+            </div>
+          }
+        </section>
+
+        <!-- 採血履歴タイムライン一覧 -->
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>採血履歴タイムライン</h2>
+              <p class="panel-desc">各回の採血カードをクリックすると、基準値ゲージと AI 相関診断レポートを表示します。</p>
+            </div>
+          </div>
+
+          <div class="timeline-list">
+            @for (rec of records; track rec.id ?? rec.tested_at) {
+              <article class="timeline-card" (click)="openRecordDetail(rec)">
+                <div class="timeline-top">
+                  <div class="timeline-meta">
+                    <span class="timeline-date">{{ rec.tested_at }}</span>
+                    <span class="timeline-facility">{{ rec.facility_name }}</span>
+                    @if (rec.weight_kg !== null) {
+                      <span class="meta-chip">⚖️ {{ rec.weight_kg }} kg</span>
+                    }
+                  </div>
+                  <div class="timeline-actions">
+                    <span class="score-pill" [ngClass]="getScoreClass(rec.overall_score)">
+                      総合体調 {{ rec.overall_score }}/10
+                    </span>
+                    <button
+                      type="button"
+                      class="icon-danger-btn"
+                      title="この記録を削除"
+                      (click)="deleteRecord(rec, $event)"
+                    >
+                      削除
+                    </button>
+                  </div>
+                </div>
+
+                <div class="mini-wellness-row">
+                  <span>活力 <strong>{{ rec.fatigue_score }}</strong></span>
+                  <span>睡眠 <strong>{{ rec.sleep_score }}</strong></span>
+                  <span>痛み少 <strong>{{ rec.pain_score }}</strong></span>
+                  <span>食欲 <strong>{{ rec.appetite_score }}</strong></span>
+                </div>
+
+                <div class="abnormal-tags">
+                  @if (getAbnormalItems(rec).length === 0) {
+                    <span class="flag-chip flag-N">全 {{ rec.items.length }} 項目 基準範囲内</span>
+                  } @else {
+                    @for (ab of getAbnormalItems(rec); track ab.item_code) {
+                      <span class="flag-chip" [ngClass]="'flag-' + ab.flag">
+                        {{ ab.item_code }} {{ ab.value }} {{ ab.unit }} ({{ ab.flag }})
+                      </span>
+                    }
+                  }
+                </div>
+
+                @if (rec.condition_note) {
+                  <p class="timeline-note">📝 {{ rec.condition_note }}</p>
+                }
+              </article>
+            }
+          </div>
+        </section>
+      }
+
+      <!-- ===== タブ 2: 採血結果の登録 ===== -->
+      @if (activeTab === 'register') {
+        <div class="register-stack">
+          <!-- ステップ A: OCR / テキスト / サンプル -->
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>ステップ A: 画像 / PDF AI読み取り・テキスト抽出</h2>
+                <p class="panel-desc">
+                  採血結果用紙の写真・PDF をアップロードするか、テキストを貼り付けて自動抽出できます（抽出後に手入力修正可能）。
+                </p>
+              </div>
+              <button type="button" class="btn-secondary" (click)="loadSampleToForm()">
+                ✨ サンプル結果を読み込む
+              </button>
+            </div>
+
+            <div class="ocr-grid">
+              <div
+                class="dropzone"
+                [class.drag-over]="isDragOver"
+                (dragover)="onDragOver($event)"
+                (dragleave)="onDragLeave()"
+                (drop)="onDrop($event)"
+              >
+                <input
+                  #fileInput
+                  type="file"
+                  accept="image/*,application/pdf"
+                  hidden
+                  (change)="onFileSelected($event)"
+                />
+                <div class="dropzone-icon">📄</div>
+                <p class="dropzone-title">画像または PDF をドラッグ＆ドロップ</p>
+                <p class="dropzone-sub">PNG / JPG / PDF 対応（{{ providerMeta[aiConfig.provider].label }} Vision OCR）</p>
+                <button type="button" class="btn-primary" [disabled]="ocrLoading" (click)="fileInput.click()">
+                  {{ ocrLoading ? '読み取り中...' : 'ファイルを選択' }}
+                </button>
+                @if (ocrFileName) {
+                  <div class="file-name-pill">選択中: {{ ocrFileName }}</div>
+                }
+                @if (ocrPreviewUrl) {
+                  <img [src]="ocrPreviewUrl" alt="アップロード画像プレビュー" class="ocr-preview" />
+                }
+              </div>
+
+              <div class="text-ocr-box">
+                <label for="ocrTextArea">検査結果テキスト貼り付け（例: <code>Hb 11.2 g/dL</code>）</label>
+                <textarea
+                  id="ocrTextArea"
+                  rows="7"
+                  [(ngModel)]="ocrRawText"
+                  placeholder="例:&#10;WBC 6200 /μL&#10;Hb 11.2 g/dL&#10;Ferritin 11 ng/mL&#10;CRP 0.35 mg/dL&#10;ALT 24 U/L"
+                ></textarea>
+                <div class="text-ocr-actions">
+                  <button type="button" class="btn-secondary" [disabled]="ocrLoading" (click)="runTextOcr()">
+                    {{ ocrLoading ? '抽出中...' : 'テキストから自動抽出' }}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            @if (ocrStatusMessage) {
+              <div class="ocr-status">{{ ocrStatusMessage }}</div>
+            }
+          </section>
+
+          <!-- ステップ B: 身体情報 & 体調10段階スコアリング -->
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>ステップ B: 身体情報 &amp; 体調10段階スコアリング</h2>
+                <p class="panel-desc">採血当時の主観的な体調を 1〜10 で記録することで、採血値との個人内相関を分析します。</p>
+              </div>
+            </div>
+
+            <div class="form-row-3">
+              <div class="field">
+                <label for="testedAt">採血日 *</label>
+                <input id="testedAt" type="date" [(ngModel)]="formTestedAt" />
+              </div>
+              <div class="field">
+                <label for="facilityName">医療機関名</label>
+                <input
+                  id="facilityName"
+                  type="text"
+                  [(ngModel)]="formFacilityName"
+                  placeholder="例: さくら内科クリニック"
+                />
+              </div>
+              <div class="field">
+                <label for="weightKg">当時の体重 (kg)</label>
+                <input id="weightKg" type="number" step="0.1" [(ngModel)]="formWeightKg" placeholder="例: 54.2" />
+              </div>
+            </div>
+
+            <div class="sliders-grid">
+              <div class="slider-card">
+                <div class="slider-top">
+                  <label for="sOverall">1. 総合体調</label>
+                  <span class="score-pill" [ngClass]="getScoreClass(formOverall)">{{ formOverall }} / 10</span>
+                </div>
+                <input id="sOverall" type="range" min="1" max="10" step="1" [(ngModel)]="formOverall" />
+                <div class="slider-scale"><span>1: 最悪</span><span>10: 絶好調</span></div>
+              </div>
+
+              <div class="slider-card">
+                <div class="slider-top">
+                  <label for="sFatigue">2. 倦怠感の少なさ・活力</label>
+                  <span class="score-pill" [ngClass]="getScoreClass(formFatigue)">{{ formFatigue }} / 10</span>
+                </div>
+                <input id="sFatigue" type="range" min="1" max="10" step="1" [(ngModel)]="formFatigue" />
+                <div class="slider-scale"><span>1: 強い倦怠感</span><span>10: 活力十分</span></div>
+              </div>
+
+              <div class="slider-card">
+                <div class="slider-top">
+                  <label for="sSleep">3. 睡眠の質</label>
+                  <span class="score-pill" [ngClass]="getScoreClass(formSleep)">{{ formSleep }} / 10</span>
+                </div>
+                <input id="sSleep" type="range" min="1" max="10" step="1" [(ngModel)]="formSleep" />
+                <div class="slider-scale"><span>1: 不眠・浅い</span><span>10: 熟睡</span></div>
+              </div>
+
+              <div class="slider-card">
+                <div class="slider-top">
+                  <label for="sPain">4. 痛み・不快感の少なさ</label>
+                  <span class="score-pill" [ngClass]="getScoreClass(formPain)">{{ formPain }} / 10</span>
+                </div>
+                <input id="sPain" type="range" min="1" max="10" step="1" [(ngModel)]="formPain" />
+                <div class="slider-scale"><span>1: 強い痛み</span><span>10: 痛みなし</span></div>
+              </div>
+
+              <div class="slider-card">
+                <div class="slider-top">
+                  <label for="sAppetite">5. 食欲・胃腸の調子</label>
+                  <span class="score-pill" [ngClass]="getScoreClass(formAppetite)">{{ formAppetite }} / 10</span>
+                </div>
+                <input id="sAppetite" type="range" min="1" max="10" step="1" [(ngModel)]="formAppetite" />
+                <div class="slider-scale"><span>1: 不振</span><span>10: 良好</span></div>
+              </div>
+            </div>
+
+            <div class="field note-field">
+              <label for="conditionNote">当時の症状・服薬変更・生活メモ</label>
+              <textarea
+                id="conditionNote"
+                rows="3"
+                [(ngModel)]="formConditionNote"
+                placeholder="例: 朝のこわばりあり。鉄剤を夕食後から隔日服用に変更。睡眠時間6時間。"
+              ></textarea>
+            </div>
+          </section>
+
+          <!-- ステップ C: 採血項目の確認・手入力修正テーブル -->
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>ステップ C: 採血項目の確認・手入力修正</h2>
+                <p class="panel-desc">
+                  現在の性別（{{ getSexLabel(profile.sex) }}）の基準値に基づき、リアルタイムに L / N / H を判定します。
+                </p>
+              </div>
+            </div>
+
+            <div class="preset-toolbar">
+              <div class="preset-select-group">
+                <select [(ngModel)]="presetToAdd" aria-label="標準項目プリセット">
+                  @for (std of standards; track std.code) {
+                    <option [value]="std.code">
+                      {{ std.code }} - {{ std.name }} ({{ std.unit }})
+                    </option>
+                  }
+                </select>
+                <button type="button" class="btn-secondary" (click)="addPresetItem()">＋ 項目を追加</button>
+                <button type="button" class="btn-ghost" (click)="addCustomItem()">＋ 自由項目</button>
+              </div>
+              <div class="quick-add-chips">
+                @for (code of ['Hb', 'Ferritin', 'CRP', 'WBC', 'ALT', 'eGFR', 'HbA1c', 'TSH']; track code) {
+                  <button type="button" class="chip-btn small" (click)="addPresetItem(code)">+{{ code }}</button>
+                }
+              </div>
+            </div>
+
+            <div class="table-scroll">
+              <table class="lab-edit-table">
+                <thead>
+                  <tr>
+                    <th>項目名</th>
+                    <th>コード</th>
+                    <th>測定値</th>
+                    <th>単位</th>
+                    <th>基準下限</th>
+                    <th>基準上限</th>
+                    <th>判定</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (item of formItems; track $index) {
+                    <tr>
+                      <td>
+                        <input type="text" [(ngModel)]="item.item_name" class="cell-input wide" />
+                      </td>
+                      <td>
+                        <input type="text" [(ngModel)]="item.item_code" class="cell-input short" />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          step="any"
+                          [(ngModel)]="item.value"
+                          (ngModelChange)="recomputeItemFlag(item)"
+                          class="cell-input num"
+                        />
+                      </td>
+                      <td>
+                        <input type="text" [(ngModel)]="item.unit" class="cell-input short" />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          step="any"
+                          [(ngModel)]="item.ref_low"
+                          (ngModelChange)="recomputeItemFlag(item)"
+                          class="cell-input num"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          step="any"
+                          [(ngModel)]="item.ref_high"
+                          (ngModelChange)="recomputeItemFlag(item)"
+                          class="cell-input num"
+                        />
+                      </td>
+                      <td>
+                        <span class="flag-badge" [ngClass]="'flag-' + item.flag">{{ item.flag }}</span>
+                      </td>
+                      <td>
+                        <button type="button" class="icon-danger-btn" (click)="removeFormItem($index)">削除</button>
+                      </td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+
+            <div class="submit-bar">
+              <button type="button" class="btn-ghost" (click)="resetForm()">フォームをリセット</button>
+              <button
+                type="button"
+                class="btn-primary large"
+                [disabled]="saving"
+                (click)="saveRecordAndAnalyze()"
+              >
+                {{ saving ? '保存 & AI 相関診断を実行中...' : '💾 保存して AI 相関診断を実行' }}
+              </button>
+            </div>
+          </section>
+        </div>
+      }
+
+      <!-- ===== タブ 3: 採血詳細 & AI 相関診断レポート ===== -->
+      @if (activeTab === 'detail') {
+        @if (!selectedRecord) {
+          <div class="panel empty-state">表示できる採血記録がありません。まずは採血結果を登録してください。</div>
+        } @else {
+          <section class="panel detail-header-panel">
+            <div class="detail-selector-row">
+              <div>
+                <h2>{{ selectedRecord.tested_at }} の採血詳細レポート</h2>
+                <p class="panel-desc">
+                  {{ selectedRecord.facility_name }}
+                  @if (selectedRecord.weight_kg !== null) {
+                    / 体重 {{ selectedRecord.weight_kg }} kg
+                  }
+                </p>
+              </div>
+              <div class="record-picker">
+                <label for="recordPicker">表示する記録:</label>
+                <select id="recordPicker" [(ngModel)]="selectedRecordId">
+                  @for (r of records; track r.id ?? r.tested_at) {
+                    <option [ngValue]="r.id">{{ r.tested_at }} - {{ r.facility_name }} (体調 {{ r.overall_score }}/10)</option>
+                  }
+                </select>
+              </div>
+            </div>
+
+            <div class="detail-wellness-grid">
+              <div class="wellness-chip-card">
+                <span class="w-label">総合体調</span>
+                <span class="score-pill" [ngClass]="getScoreClass(selectedRecord.overall_score)">
+                  {{ selectedRecord.overall_score }} / 10
+                </span>
+              </div>
+              <div class="wellness-chip-card">
+                <span class="w-label">倦怠感の少なさ・活力</span>
+                <span class="score-pill" [ngClass]="getScoreClass(selectedRecord.fatigue_score)">
+                  {{ selectedRecord.fatigue_score }} / 10
+                </span>
+              </div>
+              <div class="wellness-chip-card">
+                <span class="w-label">睡眠の質</span>
+                <span class="score-pill" [ngClass]="getScoreClass(selectedRecord.sleep_score)">
+                  {{ selectedRecord.sleep_score }} / 10
+                </span>
+              </div>
+              <div class="wellness-chip-card">
+                <span class="w-label">痛みの少なさ</span>
+                <span class="score-pill" [ngClass]="getScoreClass(selectedRecord.pain_score)">
+                  {{ selectedRecord.pain_score }} / 10
+                </span>
+              </div>
+              <div class="wellness-chip-card">
+                <span class="w-label">食欲・胃腸</span>
+                <span class="score-pill" [ngClass]="getScoreClass(selectedRecord.appetite_score)">
+                  {{ selectedRecord.appetite_score }} / 10
+                </span>
+              </div>
+            </div>
+
+            @if (selectedRecord.condition_note) {
+              <div class="detail-note">📝 当時のメモ: {{ selectedRecord.condition_note }}</div>
+            }
+          </section>
+
+          <!-- AI 相関診断カード -->
+          <section class="panel ai-report-panel">
+            <div class="panel-header">
+              <div>
+                <h2>🤖 AI 相関診断レポート</h2>
+                <p class="panel-desc">
+                  使用モデル:
+                  <strong>{{ selectedRecord.ai_provider || aiConfig.provider }}</strong>
+                  / {{ selectedRecord.ai_model || aiConfig.model }}
+                </p>
+              </div>
+              <div class="reanalyze-bar">
+                <span class="reanalyze-label">別プロバイダで再分析:</span>
+                @for (p of providers; track p) {
+                  <button
+                    type="button"
+                    class="btn-secondary small"
+                    [disabled]="analyzing"
+                    (click)="reanalyzeWith(p)"
+                  >
+                    {{ analyzing ? '分析中...' : providerMeta[p].label + ' で再分析' }}
+                  </button>
+                }
+              </div>
+            </div>
+
+            <div class="ai-cards-grid">
+              <div class="ai-card summary">
+                <h3>① 基準値からの評価サマリー</h3>
+                <p>{{ selectedRecord.ai_summary || '診断サマリーが未生成です。上のボタンから分析を実行してください。' }}</p>
+              </div>
+              <div class="ai-card correlation">
+                <h3>② 体調10段階スコア・持病・過去推移との相関考察</h3>
+                <p>{{ selectedRecord.ai_correlation || '相関考察が未生成です。' }}</p>
+              </div>
+              <div class="ai-card advice">
+                <h3>③ 主治医への相談ポイント・生活アドバイス</h3>
+                <p>{{ selectedRecord.ai_advice || 'アドバイスが未生成です。' }}</p>
+              </div>
+            </div>
+          </section>
+
+          <!-- カテゴリ別ビジュアルゲージバー一覧 -->
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>項目別 基準値レンジ・ビジュアルゲージ</h2>
+                <p class="panel-desc">緑帯が性別に応じた基準値範囲、丸マーカーが今回の測定値位置を示します。</p>
+              </div>
+            </div>
+
+            @for (group of groupedDetailItems; track group.category) {
+              <div class="category-block">
+                <h3 class="category-heading">{{ group.category }}</h3>
+                <div class="gauge-list">
+                  @for (row of group.items; track row.item.item_code + row.item.item_name) {
+                    <div class="gauge-row">
+                      <div class="gauge-info">
+                        <div class="gauge-title-line">
+                          <strong>{{ row.item.item_name }}</strong>
+                          <span class="flag-badge" [ngClass]="'flag-' + row.item.flag">{{ row.item.flag }}</span>
+                          @if (row.delta !== null) {
+                            <span class="delta-badge" [class.up]="row.delta > 0" [class.down]="row.delta < 0">
+                              前回比 {{ row.delta > 0 ? '+' : '' }}{{ row.delta }}
+                            </span>
+                          }
+                        </div>
+                        <div class="gauge-value-line">
+                          <span class="measure-val">{{ row.item.value }}</span>
+                          <span class="measure-unit">{{ row.item.unit }}</span>
+                          <span class="ref-text">
+                            基準値: {{ row.item.ref_low ?? '-' }} 〜 {{ row.item.ref_high ?? '-' }}
+                          </span>
+                        </div>
+                        @if (row.item.ai_comment) {
+                          <div class="item-comment">{{ row.item.ai_comment }}</div>
+                        }
+                      </div>
+
+                      <div class="gauge-bar-wrap">
+                        <div class="gauge-track">
+                          <div
+                            class="gauge-ref-band"
+                            [style.left.%]="row.refStartPct"
+                            [style.width.%]="row.refWidthPct"
+                          ></div>
+                          <div
+                            class="gauge-marker"
+                            [ngClass]="'flag-' + row.item.flag"
+                            [style.left.%]="row.gaugePercent"
+                          ></div>
+                        </div>
+                        <div class="gauge-ticks">
+                          <span>低値 (L)</span>
+                          <span>基準範囲 (N)</span>
+                          <span>高値 (H)</span>
+                        </div>
+                      </div>
+                    </div>
+                  }
+                </div>
+              </div>
+            }
+          </section>
+        }
+      }
+
+      <!-- ===== タブ 4: プロフィール・持病・AI プロバイダ設定 ===== -->
+      @if (activeTab === 'settings') {
+        <div class="settings-grid">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>プロフィール・持病設定</h2>
+                <p class="panel-desc">性別を変更すると、採血項目の基準値マスタとグラフの基準値帯が連動します。</p>
+              </div>
+            </div>
+
+            <div class="form-grid-2">
+              <div class="field">
+                <label for="profName">お名前 / ニックネーム</label>
+                <input id="profName" type="text" [(ngModel)]="profileForm.name" />
+              </div>
+              <div class="field">
+                <label for="profAge">年齢</label>
+                <input id="profAge" type="number" min="0" max="120" [(ngModel)]="profileForm.age" />
+              </div>
+              <div class="field">
+                <label for="profSex">性別（基準値マスタ連動）</label>
+                <select id="profSex" [(ngModel)]="profileForm.sex">
+                  <option value="female">女性</option>
+                  <option value="male">男性</option>
+                  <option value="other">その他</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="profHeight">身長 (cm) — 推定 BMI: {{ profileFormBmi }}</label>
+                <input id="profHeight" type="number" step="0.5" [(ngModel)]="profileForm.height_cm" />
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="profConditions">持病・基礎疾患（カンマ区切り）</label>
+              <textarea
+                id="profConditions"
+                rows="2"
+                [(ngModel)]="profileForm.chronic_conditions"
+                placeholder="例: 鉄欠乏性貧血, 関節リウマチ, 脂質異常症"
+              ></textarea>
+            </div>
+
+            <div class="field">
+              <label for="profMeds">常用薬・サプリメントメモ</label>
+              <textarea
+                id="profMeds"
+                rows="3"
+                [(ngModel)]="profileForm.medications"
+                placeholder="例: フェロミア 50mg（夕食後）, 葉酸"
+              ></textarea>
+            </div>
+
+            <div class="form-actions">
+              <button type="button" class="btn-primary" [disabled]="saving" (click)="saveProfile()">
+                {{ saving ? '保存中...' : 'プロフィールを保存' }}
+              </button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>AI プロバイダ &amp; API キー設定</h2>
+                <p class="panel-desc">
+                  Gemini / OpenAI / Claude を自由に切り替えられます。API キー未入力時でもサーバー設定またはローカル相関エンジンで動作します。
+                </p>
+              </div>
+            </div>
+
+            <div class="provider-cards">
+              @for (p of providers; track p) {
+                <button
+                  type="button"
+                  class="provider-card"
+                  [class.active]="aiConfig.provider === p"
+                  (click)="selectProvider(p)"
+                >
+                  <div class="provider-card-head">
+                    <span class="provider-dot" [style.background]="providerMeta[p].color"></span>
+                    <strong>{{ providerMeta[p].label }}</strong>
+                  </div>
+                  <p>{{ providerMeta[p].description }}</p>
+                </button>
+              }
+            </div>
+
+            <div class="field">
+              <label for="modelInput">使用モデル名（{{ providerMeta[aiConfig.provider].label }}）</label>
+              <input id="modelInput" type="text" [(ngModel)]="aiConfig.model" />
+              <div class="model-presets">
+                @for (m of providerMeta[aiConfig.provider].models; track m) {
+                  <button
+                    type="button"
+                    class="chip-btn small"
+                    [class.active]="aiConfig.model === m"
+                    (click)="selectModel(m)"
+                  >
+                    {{ m }}
+                  </button>
+                }
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="apiKeyInput">
+                {{ providerMeta[aiConfig.provider].label }} API キー（任意・ブラウザ localStorage にのみ保存）
+              </label>
+              <div class="apikey-row">
+                <input
+                  id="apiKeyInput"
+                  [type]="showApiKey ? 'text' : 'password'"
+                  [(ngModel)]="aiConfig.apiKeys[aiConfig.provider]"
+                  placeholder="未入力でもローカル分析・サーバーキーで動作します"
+                />
+                <button type="button" class="btn-ghost" (click)="showApiKey = !showApiKey">
+                  {{ showApiKey ? '隠す' : '表示' }}
+                </button>
+                <button type="button" class="icon-danger-btn" (click)="clearCurrentApiKey()">消去</button>
+              </div>
+            </div>
+
+            <div class="form-actions">
+              <button type="button" class="btn-primary" (click)="saveAiSettings()">AI 設定を保存</button>
+            </div>
+          </section>
+        </div>
+
+        <!-- 基準値マスタ一覧 -->
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>基準値マスタ（現在選択中の性別: {{ getSexLabel(profileForm.sex) }}）</h2>
+              <p class="panel-desc">プロフィール性別を切り替えると、以下の基準範囲がリアルタイムに確認できます。</p>
+            </div>
+          </div>
+
+          <div class="table-scroll">
+            <table class="standards-table">
+              <thead>
+                <tr>
+                  <th>カテゴリ</th>
+                  <th>コード</th>
+                  <th>項目名</th>
+                  <th>基準範囲（{{ getSexLabel(profileForm.sex) }}）</th>
+                  <th>単位</th>
+                  <th>意義・体調との関連</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (std of standards; track std.code) {
+                  <tr>
+                    <td>{{ std.category }}</td>
+                    <td><code>{{ std.code }}</code></td>
+                    <td><strong>{{ std.name }}</strong></td>
+                    <td>
+                      {{ getStandardRangeForSex(std, profileForm.sex)[0] }} 〜
+                      {{ getStandardRangeForSex(std, profileForm.sex)[1] }}
+                    </td>
+                    <td>{{ std.unit }}</td>
+                    <td class="muted-cell">{{ std.description }}</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+        </section>
+      }
+    }
+  </main>
+</div>

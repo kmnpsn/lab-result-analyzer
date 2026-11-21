@@ -1,0 +1,26 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "lab-result-analyzer",
+  "main": "worker/index.ts",
+  "compatibility_date": "2025-03-01",
+  "assets": {
+    "directory": "./dist/lab-result-analyzer/browser",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "lab-result-db",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "DEFAULT_AI_PROVIDER": "gemini",
+    "DEFAULT_GEMINI_MODEL": "gemini-2.5-flash",
+    "DEFAULT_OPENAI_MODEL": "gpt-4o-mini",
+    "DEFAULT_CLAUDE_MODEL": "claude-sonnet-4-5"
+  }
+}
