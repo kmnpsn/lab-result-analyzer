@@ -145,3 +145,50 @@ CREATE TABLE IF NOT EXISTS invitations (
 - **Secrets（Cloudflare 側で Owner が管理・リポジトリ非保存）**:
   - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET`, `OAUTH_TRANSACTION_SECRET`
   - 非 Secret 変数: `REGISTRATION_MODE`（`invite_only` / `open`）、`BOOTSTRAP_OWNER_EMAIL`、`GOOGLE_REDIRECT_URI`、`AUTH_MODE`（`demo` / `production`）
+
+---
+
+## 5. Owner の手順（Google のログイン設定作成 〜 Cloudflare 登録）
+
+### 手順 1: Google Cloud Console で OAuth クライアントを作る（10分）
+
+1. https://console.cloud.google.com/ を開き、上部のプロジェクト選択から新しいプロジェクト（例: `karada-techo`）を作る（または既存プロジェクトを選ぶが、同意画面のアプリ名を「からだ手帳」にするため新プロジェクト推奨）。
+2. 左メニューから **「Google Auth Platform」**（または **「API とサービス」＞「OAuth 同意画面」**）を開き、「開始」を押す。
+   - **アプリ名**: `からだ手帳`
+   - **ユーザー サポートメール**: ご自身のメールアドレス
+   - **対象（User Type）**: `外部`
+   - **デベロッパーの連絡先情報**: ご自身のメールアドレスを入れて作成する。
+3. **「対象」（または「テストユーザー」）** 画面で、テストユーザーとして **ご自身と招待したいご家族の Google アカウント** を追加する（一般公開するまでは「テスト」のままで問題ありません）。
+4. **「クライアント」＞「クライアントを作成」**（または「認証情報を作成」＞「OAuth クライアント ID」）を押す。
+   - **アプリケーションの種類**: `ウェブ アプリケーション`
+   - **名前**: `からだ手帳 Web`
+   - **承認済みの JavaScript 生成元**:
+     ```text
+     https://lab-result-analyzer.kmnpsn.workers.dev
+     ```
+   - **承認済みのリダイレクト URI**（1文字でも違うと動かないためそのままコピー）:
+     ```text
+     https://lab-result-analyzer.kmnpsn.workers.dev/api/auth/google/callback
+     ```
+5. 作成すると **「クライアント ID」** と **「クライアント シークレット」** が表示されるため、画面を開いたまま次の手順へ進む。
+
+### 手順 2: Cloudflare Worker に設定を登録する（3分）
+
+ターミナルで `lab-result-analyzer` フォルダを開き、以下のワンコマンド登録スクリプトを実行する（入力した Client ID / Secret は画面やログに残らず、`SESSION_SECRET` と `OAUTH_TRANSACTION_SECRET` は `openssl rand -base64 32` で自動生成されます）：
+
+```bash
+cd ~/work/lab-result-analyzer
+npm run cf:oauth
+```
+
+（※ 1行ずつ手動で登録したい場合は以下でも同じです）
+```bash
+npx wrangler secret put GOOGLE_CLIENT_ID --name lab-result-analyzer
+npx wrangler secret put GOOGLE_CLIENT_SECRET --name lab-result-analyzer
+npx wrangler secret put GOOGLE_REDIRECT_URI --name lab-result-analyzer
+npx wrangler secret put BOOTSTRAP_OWNER_EMAIL --name lab-result-analyzer
+openssl rand -base64 32 | npx wrangler secret put SESSION_SECRET --name lab-result-analyzer
+openssl rand -base64 32 | npx wrangler secret put OAUTH_TRANSACTION_SECRET --name lab-result-analyzer
+```
+
+- D1 のログイン用テーブル（`0003_auth_identities_and_invites.sql`）と Worker コードは **すでに本番へ適用・デプロイ済み** のため、上記を登録した瞬間から https://lab-result-analyzer.kmnpsn.workers.dev で本物の Google ログイン（招待制）がそのまま動きます。
