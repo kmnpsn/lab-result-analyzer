@@ -1676,6 +1676,153 @@
           }
         </div>
 
+        <!-- 持病・症状→関連検査項目マスタ管理（自動提案のワンクリック登録＋手動後追い登録） -->
+        <section class="panel condition-master-panel">
+          <div class="panel-header">
+            <div>
+              <h2>🩺 持病・症状マスタ管理（後追い登録・自動提案）</h2>
+              <p class="panel-desc">
+                標準で {{ defaultConditionRules.length }} カテゴリの持病・症状（IBD/クローン病・潰瘍性大腸炎・IBS・高尿酸血症・脊柱管狭窄症・坐骨神経痛など）を搭載しています。持病メモに新しい病名を書いた際の自動提案や、手動での後追い登録もできます。
+              </p>
+            </div>
+          </div>
+
+          <!-- 持病メモから検知された未登録病名・症状の自動提案 -->
+          @if (conditionSuggestions.length > 0) {
+            <div class="condition-suggest-box">
+              <div class="condition-suggest-head">
+                💡 持病メモにマスタ未登録の病名・症状が見つかりました（ワンクリックでマスタ登録できます）
+              </div>
+              <div class="condition-suggest-list">
+                @for (sug of conditionSuggestions; track sug.term) {
+                  <div class="condition-suggest-card">
+                    <div class="condition-suggest-info">
+                      <strong>{{ sug.term }}</strong>
+                      <div class="condition-suggest-codes">
+                        関連候補:
+                        @for (c of sug.suggested_codes; track c) {
+                          <span class="meta-chip">{{ c }}</span>
+                        }
+                      </div>
+                      <p class="condition-suggest-reason">{{ sug.reason }}</p>
+                    </div>
+                    <div class="condition-suggest-actions">
+                      <button
+                        type="button"
+                        class="btn-primary small-btn"
+                        [disabled]="savingConditionRule"
+                        (click)="acceptConditionSuggestion(sug)"
+                      >
+                        マスタに登録して反映
+                      </button>
+                      <button
+                        type="button"
+                        class="btn-ghost small-btn"
+                        (click)="dismissConditionSuggestion(sug.term)"
+                      >
+                        今はしない
+                      </button>
+                    </div>
+                  </div>
+                }
+              </div>
+            </div>
+          }
+
+          <!-- 手動での後追い登録フォーム -->
+          <div class="condition-add-box">
+            <h3 class="auth-sub-heading">新しい持病・症状をマスタに後追い登録</h3>
+            <div class="form-grid-2">
+              <div class="field">
+                <label for="newRuleLabel">病名・症状名</label>
+                <input
+                  id="newRuleLabel"
+                  type="text"
+                  [(ngModel)]="newRuleLabel"
+                  placeholder="例: サルコイドーシス / 掌蹠膿疱症 / 肋間神経痛"
+                />
+              </div>
+              <div class="field">
+                <label for="newRuleKeywords">ヒットさせるキーワード（任意・カンマ区切り）</label>
+                <input
+                  id="newRuleKeywords"
+                  type="text"
+                  [(ngModel)]="newRuleKeywords"
+                  placeholder="空欄なら病名そのものでヒット"
+                />
+              </div>
+            </div>
+
+            <div class="field">
+              <label>関連付けて優先表示する検査項目（クリックで選択）</label>
+              <div class="rule-code-chips">
+                @for (std of standards; track std.code) {
+                  <button
+                    type="button"
+                    class="chip-btn small"
+                    [class.active]="newRuleCodes.includes(std.code)"
+                    (click)="toggleNewRuleCode(std.code)"
+                  >
+                    {{ std.code }}
+                  </button>
+                }
+              </div>
+            </div>
+
+            <div class="form-actions">
+              <button
+                type="button"
+                class="btn-primary small-btn"
+                [disabled]="savingConditionRule"
+                (click)="addCustomConditionRule()"
+              >
+                {{ savingConditionRule ? '登録中...' : '＋ マスタに追加する' }}
+              </button>
+            </div>
+          </div>
+
+          <!-- 登録済みカスタムマスタ一覧 -->
+          @if (conditionRules.length > 0) {
+            <div class="custom-rules-list">
+              <h3 class="auth-sub-heading">あなたが追加したカスタムマスタ（{{ conditionRules.length }}件）</h3>
+              @for (rule of conditionRules; track rule.id) {
+                <div class="custom-rule-row">
+                  <div class="custom-rule-info">
+                    <strong>{{ rule.label }}</strong>
+                    @if (rule.source === 'auto_suggested') {
+                      <span class="rec-item-badge">自動提案から登録</span>
+                    }
+                    <div class="custom-rule-meta">
+                      キーワード: {{ rule.keywords.join(', ') }} ／ 関連項目: {{ rule.codes.join(', ') }}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    class="icon-danger-btn"
+                    [disabled]="savingConditionRule"
+                    (click)="deleteCustomConditionRule(rule)"
+                  >
+                    削除
+                  </button>
+                </div>
+              }
+            </div>
+          }
+
+          <!-- 標準28カテゴリの折りたたみ確認 -->
+          <details class="default-rules-details">
+            <summary>標準搭載の持病・症状マスタ一覧を見る（全 {{ defaultConditionRules.length }} カテゴリ）</summary>
+            <div class="default-rules-grid">
+              @for (dr of defaultConditionRules; track dr.label) {
+                <div class="default-rule-chip">
+                  <strong>{{ dr.label }}</strong>
+                  <span>{{ dr.codes.join(', ') }}</span>
+                </div>
+              }
+            </div>
+          </details>
+        </section>
+
         <!-- 基準値マスタ一覧（表示/非表示カスタマイズ & 持病おすすめ連動） -->
         <section class="panel">
           <div class="panel-header">

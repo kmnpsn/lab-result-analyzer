@@ -190,6 +190,21 @@ export function lookupStandard(codeOrName: string, sex: BiologicalSex = 'male'):
   return { standard: found, refLow: range[0], refHigh: range[1] };
 }
 
+export interface ConditionItemRule {
+  id?: number;
+  label: string;
+  keywords: string[];
+  codes: string[];
+  source?: 'default' | 'manual' | 'auto_suggested';
+  created_at?: string;
+}
+
+export interface ConditionRuleSuggestion {
+  term: string;
+  suggested_codes: string[];
+  reason: string;
+}
+
 export const DEFAULT_QUICK_ITEM_CODES: ReadonlyArray<string> = [
   'Hb',
   'CRP',
@@ -203,59 +218,194 @@ export const DEFAULT_QUICK_ITEM_CODES: ReadonlyArray<string> = [
   'LDL',
 ];
 
-const CONDITION_ITEM_RULES: ReadonlyArray<{ keywords: ReadonlyArray<string>; codes: ReadonlyArray<string> }> = [
+export const DEFAULT_CONDITION_ITEM_RULES: ReadonlyArray<ConditionItemRule> = [
   {
+    label: '高尿酸血症・痛風',
     keywords: ['痛風', '高尿酸', '尿酸', 'gout', 'uric'],
     codes: ['UA', 'Cr', 'eGFR', 'BUN', 'CRP'],
+    source: 'default',
   },
   {
-    keywords: ['貧血', '鉄欠乏', 'フェリチン', 'anemia'],
-    codes: ['Hb', 'Ferritin', 'RBC', 'Ht'],
-  },
-  {
-    keywords: ['肝', '脂肪肝', '肝炎', '肝硬変', 'アルコール', 'liver'],
-    codes: ['AST', 'ALT', 'gGTP', 'Alb', 'PLT'],
-  },
-  {
-    keywords: ['腎', 'ckd', '腎不全', 'ネフローゼ', '透析', 'kidney'],
-    codes: ['Cr', 'eGFR', 'BUN', 'UA', 'Alb', 'Hb'],
-  },
-  {
-    keywords: ['糖尿', '血糖', '高血糖', 'インスリン', 'diabetes'],
-    codes: ['HbA1c', 'Glu', 'TG', 'LDL', 'Cr', 'eGFR'],
-  },
-  {
-    keywords: ['脂質', 'コレステロール', '中性脂肪', '高脂血', 'dyslipidemia'],
-    codes: ['LDL', 'HDL', 'TG', 'AST', 'ALT'],
-  },
-  {
-    keywords: ['クローン', '潰瘍性', 'ibd', '膠原病', 'リウマチ', '自己免疫', '炎症', '難病'],
+    label: 'IBD（クローン病・潰瘍性大腸炎）',
+    keywords: ['クローン', '潰瘍性大腸炎', '潰瘍性', 'ibd', '炎症性腸疾患', 'crohn', 'uc'],
     codes: ['CRP', 'WBC', 'Alb', 'Hb', 'Ferritin', 'PLT'],
+    source: 'default',
   },
   {
-    keywords: ['甲状腺', 'バセドウ', '橋本', 'thyroid'],
-    codes: ['TSH', 'LDL', 'AST', 'ALT'],
+    label: 'IBS（過敏性腸症候群）・胃腸過敏',
+    keywords: ['過敏性腸', 'ibs', '機能性ディスペプシア', '下痢型', '便秘型', '腸過敏'],
+    codes: ['CRP', 'Hb', 'Alb', 'WBC', 'Ferritin'],
+    source: 'default',
   },
   {
-    keywords: ['高血圧', '心疾患', '動脈硬化', '狭心症'],
+    label: '脊柱管狭窄症・坐骨神経痛・椎間板ヘルニア',
+    keywords: ['脊柱管狭窄', '狭窄症', '坐骨神経痛', '椎間板ヘルニア', 'ヘルニア', '腰痛症', 'すべり症'],
+    codes: ['CRP', 'Cr', 'eGFR', 'AST', 'ALT', 'HbA1c'],
+    source: 'default',
+  },
+  {
+    label: '関節リウマチ・膠原病・自己免疫疾患',
+    keywords: ['リウマチ', '膠原病', '自己免疫', 'sle', 'シェーグレン', 'ベーチェット', '血管炎'],
+    codes: ['CRP', 'WBC', 'PLT', 'Hb', 'Cr', 'eGFR', 'AST', 'ALT'],
+    source: 'default',
+  },
+  {
+    label: '変形性関節症・骨粗鬆症・筋骨格痛',
+    keywords: ['変形性関節', '関節症', '骨粗鬆症', '骨粗しょう症', '線維筋痛症', '腱鞘炎', '関節痛'],
+    codes: ['CRP', 'Alb', 'Cr', 'eGFR', 'AST', 'ALT'],
+    source: 'default',
+  },
+  {
+    label: '貧血・鉄欠乏性貧血',
+    keywords: ['貧血', '鉄欠乏', 'フェリチン', 'anemia', '立ちくらみ'],
+    codes: ['Hb', 'Ferritin', 'RBC', 'Ht'],
+    source: 'default',
+  },
+  {
+    label: '糖尿病・高血糖・耐糖能異常',
+    keywords: ['糖尿', '血糖', '高血糖', 'インスリン', 'diabetes', '境界型'],
+    codes: ['HbA1c', 'Glu', 'TG', 'LDL', 'Cr', 'eGFR'],
+    source: 'default',
+  },
+  {
+    label: '脂質異常症・高コレステロール血症',
+    keywords: ['脂質異常', '脂質', 'コレステロール', '中性脂肪', '高脂血', 'dyslipidemia'],
+    codes: ['LDL', 'HDL', 'TG', 'AST', 'ALT'],
+    source: 'default',
+  },
+  {
+    label: '高血圧・動脈硬化・心疾患',
+    keywords: ['高血圧', '心疾患', '動脈硬化', '狭心症', '不整脈', '心不全'],
     codes: ['LDL', 'HDL', 'TG', 'Cr', 'eGFR', 'UA', 'HbA1c'],
+    source: 'default',
   },
   {
-    keywords: ['疲労', '倦怠', 'だるさ'],
-    codes: ['Hb', 'Ferritin', 'TSH', 'CRP', 'ALT'],
+    label: '慢性腎臓病（CKD）・腎機能低下',
+    keywords: ['腎臓', '腎機能', 'ckd', '腎不全', 'ネフローゼ', '透析', '蛋白尿', 'kidney'],
+    codes: ['Cr', 'eGFR', 'BUN', 'UA', 'Alb', 'Hb'],
+    source: 'default',
+  },
+  {
+    label: '脂肪肝・肝炎・肝機能障害',
+    keywords: ['肝機能', '脂肪肝', '肝炎', '肝硬変', '肝障害', 'アルコール性', 'liver'],
+    codes: ['AST', 'ALT', 'gGTP', 'Alb', 'PLT', 'TG'],
+    source: 'default',
+  },
+  {
+    label: '胆石・胆道系疾患・膵炎',
+    keywords: ['胆石', '胆嚢', '胆道', '膵炎', 'すい炎'],
+    codes: ['gGTP', 'AST', 'ALT', 'CRP', 'WBC', 'TG'],
+    source: 'default',
+  },
+  {
+    label: '甲状腺疾患（バセドウ病・橋本病）',
+    keywords: ['甲状腺', 'バセドウ', '橋本病', 'thyroid'],
+    codes: ['TSH', 'LDL', 'AST', 'ALT', 'Hb'],
+    source: 'default',
+  },
+  {
+    label: 'ぜんそく・COPD・呼吸器疾患',
+    keywords: ['喘息', 'ぜんそく', 'copd', '気管支炎', '間質性肺炎', '呼吸器'],
+    codes: ['WBC', 'CRP', 'Hb', 'Ht'],
+    source: 'default',
+  },
+  {
+    label: 'アレルギー・アトピー性皮膚炎',
+    keywords: ['アレルギー', 'アトピー', '花粉症', '蕁麻疹', 'じんましん'],
+    codes: ['WBC', 'CRP', 'AST', 'ALT'],
+    source: 'default',
+  },
+  {
+    label: '胃炎・逆流性食道炎・胃潰瘍',
+    keywords: ['胃炎', '逆流性食道炎', '胃潰瘍', '十二指腸潰瘍', 'ピロリ'],
+    codes: ['Hb', 'Ferritin', 'RBC', 'Alb', 'CRP'],
+    source: 'default',
+  },
+  {
+    label: '片頭痛・自律神経失調症・めまい',
+    keywords: ['片頭痛', '偏頭痛', '自律神経', 'めまい', 'メニエール', '起立性調節障害'],
+    codes: ['Hb', 'Ferritin', 'TSH', 'Glu', 'Cr'],
+    source: 'default',
+  },
+  {
+    label: '睡眠障害・睡眠時無呼吸症候群（SAS）',
+    keywords: ['睡眠時無呼吸', 'sas', '不眠', '睡眠障害', 'いびき'],
+    codes: ['HbA1c', 'TG', 'LDL', 'UA', 'Hb', 'Ht'],
+    source: 'default',
+  },
+  {
+    label: 'うつ・不安障害・メンタル不調',
+    keywords: ['うつ', '鬱', '不安障害', 'パニック', '適応障害', '双極性'],
+    codes: ['TSH', 'Hb', 'Ferritin', 'AST', 'ALT', 'gGTP'],
+    source: 'default',
+  },
+  {
+    label: '婦人科系（子宮筋腫・内膜症・更年期）',
+    keywords: ['子宮筋腫', '子宮内膜症', '月経過多', '更年期', 'pms'],
+    codes: ['Hb', 'Ferritin', 'RBC', 'Ht', 'TSH', 'LDL'],
+    source: 'default',
+  },
+  {
+    label: '乾癬・自己炎症・慢性皮膚疾患',
+    keywords: ['乾癬', '掌蹠膿疱症', '自己炎症', '皮膚炎'],
+    codes: ['CRP', 'WBC', 'UA', 'AST', 'ALT', 'LDL'],
+    source: 'default',
+  },
+  {
+    label: '血栓症・凝固異常・抗凝固療法',
+    keywords: ['血栓', '深部静脈', '凝固', 'ワーファリン', '血小板'],
+    codes: ['PLT', 'Hb', 'Cr', 'eGFR', 'AST', 'ALT'],
+    source: 'default',
+  },
+  {
+    label: '慢性疲労・倦怠感・だるさ',
+    keywords: ['慢性疲労', '疲労', '倦怠', 'だるさ'],
+    codes: ['Hb', 'Ferritin', 'TSH', 'CRP', 'ALT', 'Alb'],
+    source: 'default',
+  },
+  {
+    label: 'むくみ（浮腫）・低栄養',
+    keywords: ['むくみ', '浮腫', '低栄養', '低アルブミン'],
+    codes: ['Alb', 'Cr', 'eGFR', 'BUN', 'TSH', 'Hb'],
+    source: 'default',
+  },
+  {
+    label: '肥満・メタボリックシンドローム',
+    keywords: ['肥満', 'メタボ', '内臓脂肪', '減量中'],
+    codes: ['HbA1c', 'Glu', 'LDL', 'HDL', 'TG', 'ALT', 'gGTP', 'UA'],
+    source: 'default',
+  },
+  {
+    label: '感染症・微熱・不明熱',
+    keywords: ['感染', '微熱', '発熱', '不明熱', '炎症'],
+    codes: ['WBC', 'CRP', 'PLT', 'AST', 'ALT'],
+    source: 'default',
+  },
+  {
+    label: 'お薬の長期服用・副作用フォロー',
+    keywords: ['ステロイド', 'nsaids', '痛み止め', '鎮痛薬', '免疫抑制', '生物学的製剤', '長期服用'],
+    codes: ['AST', 'ALT', 'gGTP', 'Cr', 'eGFR', 'HbA1c', 'WBC'],
+    source: 'default',
   },
 ];
 
 /**
  * 持病メモ（chronic_conditions）から優先的に確認したい検査項目コードを抽出する
+ * （デフォルト28カテゴリ＋ユーザー登録済みカスタムルールを統合評価）
  */
-export function recommendItemCodesForConditions(chronicConditions: string): string[] {
+export function recommendItemCodesForConditions(
+  chronicConditions: string,
+  customRules: ReadonlyArray<ConditionItemRule> = []
+): string[] {
   const normalized = (chronicConditions || '').toLowerCase();
   if (!normalized.trim()) return [];
   const validCodes = new Set(REFERENCE_STANDARDS.map((s) => s.code));
   const result: string[] = [];
-  for (const rule of CONDITION_ITEM_RULES) {
-    if (rule.keywords.some((kw) => normalized.includes(kw.toLowerCase()))) {
+
+  // ユーザーが後追い登録したカスタムルールを先に優先評価し、続いてデフォルトマスタを評価
+  const allRules: ReadonlyArray<ConditionItemRule> = [...customRules, ...DEFAULT_CONDITION_ITEM_RULES];
+  for (const rule of allRules) {
+    if (rule.keywords.some((kw) => kw.trim() && normalized.includes(kw.trim().toLowerCase()))) {
       for (const code of rule.codes) {
         if (validCodes.has(code) && !result.includes(code)) {
           result.push(code);
@@ -264,6 +414,106 @@ export function recommendItemCodesForConditions(chronicConditions: string): stri
     }
   }
   return result;
+}
+
+/**
+ * 持病メモに記載された語句のうち、既存マスタ（デフォルト＋カスタム）にヒットしない未登録語句を抽出する
+ */
+export function findUnmatchedConditionTerms(
+  chronicConditions: string,
+  customRules: ReadonlyArray<ConditionItemRule> = []
+): string[] {
+  const rawTerms = (chronicConditions || '')
+    .split(/[,、・/\n]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 2);
+  if (rawTerms.length === 0) return [];
+
+  const allRules: ReadonlyArray<ConditionItemRule> = [...customRules, ...DEFAULT_CONDITION_ITEM_RULES];
+  const unmatched: string[] = [];
+
+  for (const term of rawTerms) {
+    const lower = term.toLowerCase();
+    const matched = allRules.some((rule) =>
+      rule.keywords.some((kw) => kw.trim() && lower.includes(kw.trim().toLowerCase()))
+    );
+    if (!matched && !unmatched.includes(term)) {
+      unmatched.push(term);
+    }
+  }
+  return unmatched;
+}
+
+/**
+ * 未登録の病名・症状に対して、語幹や臓器・症状の傾向から採血関連項目候補を推定する
+ */
+export function suggestItemCodesForUnknownCondition(term: string): ConditionRuleSuggestion | null {
+  const lower = term.trim().toLowerCase();
+  if (!lower || lower.length < 2) return null;
+
+  const heuristics: Array<{ pattern: RegExp; codes: string[]; reason: string }> = [
+    {
+      pattern: /炎|腫|熱|膿|痛|リウマチ|膠原|免疫/,
+      codes: ['CRP', 'WBC', 'PLT', 'AST', 'ALT'],
+      reason: '炎症や痛み止め等の服薬に伴う指標（CRP・白血球・肝機能）を確認するため',
+    },
+    {
+      pattern: /腸|胃|腹|消化|食道|便|下痢|吸収/,
+      codes: ['CRP', 'Alb', 'Hb', 'Ferritin', 'WBC'],
+      reason: '消化器系の炎症・栄養吸収・貧血傾向を確認するため',
+    },
+    {
+      pattern: /腎|尿|膀胱|結石|むくみ|浮腫/,
+      codes: ['Cr', 'eGFR', 'BUN', 'UA', 'Alb'],
+      reason: '腎機能や尿酸・水分バランスを確認するため',
+    },
+    {
+      pattern: /肝|胆|膵|酒|飲酒/,
+      codes: ['AST', 'ALT', 'gGTP', 'Alb', 'PLT'],
+      reason: '肝胆道系の負担を確認するため',
+    },
+    {
+      pattern: /血|貧血|めまい|ふらつき|息切れ|だる|疲/,
+      codes: ['Hb', 'Ferritin', 'RBC', 'Ht', 'TSH'],
+      reason: '貧血・貯蔵鉄・甲状腺バランスを確認するため',
+    },
+    {
+      pattern: /糖|肥満|体重|代謝|コレステロール|脂|圧|心|脳|血管/,
+      codes: ['HbA1c', 'Glu', 'LDL', 'HDL', 'TG', 'UA', 'Cr'],
+      reason: '糖・脂質代謝および血管・腎臓への影響を確認するため',
+    },
+    {
+      pattern: /神経|腰|首|肩|膝|関節|骨|筋|しびれ|狭窄|ヘルニア/,
+      codes: ['CRP', 'Cr', 'eGFR', 'AST', 'ALT', 'HbA1c'],
+      reason: '炎症の有無や鎮痛薬長期使用時の肝腎フォロー、神経障害の背景確認のため',
+    },
+    {
+      pattern: /皮膚|湿疹|かゆみ|アレルギー|喘息|鼻/,
+      codes: ['WBC', 'CRP', 'AST', 'ALT'],
+      reason: '炎症反応や治療薬の肝機能フォローのため',
+    },
+    {
+      pattern: /ホルモン|更年期|生理|月経|眠|自律|メンタル/,
+      codes: ['TSH', 'Hb', 'Ferritin', 'Alb', 'AST', 'ALT'],
+      reason: 'ホルモン・鉄分・全身状態のバランスを確認するため',
+    },
+    {
+      pattern: /病|症|障害|疾患|フォロー|経過観察/,
+      codes: ['CRP', 'WBC', 'Hb', 'AST', 'ALT', 'Cr', 'eGFR'],
+      reason: '一般的な経過観察として炎症・貧血・肝腎の基本項目を確認するため',
+    },
+  ];
+
+  for (const h of heuristics) {
+    if (h.pattern.test(lower)) {
+      return {
+        term: term.trim(),
+        suggested_codes: h.codes,
+        reason: h.reason,
+      };
+    }
+  }
+  return null;
 }
 
 export function parseVisibleItemCodes(raw: unknown): string[] {
@@ -300,18 +550,17 @@ export function parseVisibleItemCodes(raw: unknown): string[] {
  */
 export function resolveVisibleItemCodes(
   chronicConditions: string,
-  savedVisibleCodes?: string[] | null
+  savedVisibleCodes?: string[] | null,
+  customRules: ReadonlyArray<ConditionItemRule> = []
 ): string[] {
-  const recommended = recommendItemCodesForConditions(chronicConditions);
+  const recommended = recommendItemCodesForConditions(chronicConditions, customRules);
   const cleanedSaved = parseVisibleItemCodes(savedVisibleCodes);
   if (cleanedSaved.length > 0) {
-    // ユーザー設定を尊重しつつ、その中に含まれる持病おすすめ項目を先頭に並べる
     const savedSet = new Set(cleanedSaved);
     const prioritized = recommended.filter((c) => savedSet.has(c));
     const rest = cleanedSaved.filter((c) => !prioritized.includes(c));
     return [...prioritized, ...rest];
   }
-  // 未設定時は「持病おすすめ」を最上位にし、基本項目を続ける
   const merged = [...recommended];
   for (const code of DEFAULT_QUICK_ITEM_CODES) {
     if (!merged.includes(code)) {

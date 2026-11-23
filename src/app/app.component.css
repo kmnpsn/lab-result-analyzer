@@ -2209,6 +2209,138 @@ button:disabled {
   background: #ffffff;
 }
 
+.condition-suggest-box {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 0.9rem;
+  margin-bottom: 1rem;
+}
+
+.condition-suggest-head {
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: #fde68a;
+  margin-bottom: 0.65rem;
+}
+
+.condition-suggest-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.condition-suggest-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.7rem 0.85rem;
+}
+
+.condition-suggest-info {
+  flex: 1;
+  min-width: 200px;
+}
+
+.condition-suggest-codes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.3rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.condition-suggest-reason {
+  margin: 0.3rem 0 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.condition-suggest-actions {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.condition-add-box {
+  padding-top: 0.25rem;
+}
+
+.rule-code-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.custom-rules-list {
+  margin-top: 1rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.custom-rule-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.custom-rule-meta {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-top: 0.2rem;
+}
+
+.default-rules-details {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 0.84rem;
+}
+
+.default-rules-details summary {
+  cursor: pointer;
+  color: #5eead4;
+  font-weight: 600;
+}
+
+.default-rules-grid {
+  margin-top: 0.7rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.5rem;
+}
+
+.default-rule-chip {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.78rem;
+}
+
+.default-rule-chip span {
+  color: var(--text-muted);
+  font-size: 0.73rem;
+}
+
 @media (max-width: 768px) {
   .desktop-title,
   .tab-nav,

@@ -2,11 +2,14 @@ import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  DEFAULT_CONDITION_ITEM_RULES,
   REFERENCE_STANDARDS,
   computeFlag,
+  findUnmatchedConditionTerms,
   lookupStandard,
   recommendItemCodesForConditions,
   resolveVisibleItemCodes,
+  suggestItemCodesForUnknownCondition,
   type AccountSummary,
   type LabRecord,
 } from '../src/shared/types.ts';
@@ -55,10 +58,29 @@ describe('基準値マスタ・H/N/L 判定ロジック (src/shared/types.ts)', 
   });
 
   it('持病メモ（高尿酸血症・痛風など）から関連検査項目（UA 等）を優先抽出し、表示項目カスタマイズと合成できる', () => {
+    assert.ok(DEFAULT_CONDITION_ITEM_RULES.length >= 25);
+
     const goutRec = recommendItemCodesForConditions('高尿酸血症（痛風）');
     assert.equal(goutRec[0], 'UA');
     assert.ok(goutRec.includes('Cr'));
     assert.ok(goutRec.includes('eGFR'));
+
+    // IBD（潰瘍性大腸炎）・IBS・脊柱管狭窄症・坐骨神経痛も標準搭載されている
+    const ucRec = recommendItemCodesForConditions('潰瘍性大腸炎');
+    assert.ok(ucRec.includes('CRP'));
+    assert.ok(ucRec.includes('Alb'));
+    const ibsRec = recommendItemCodesForConditions('過敏性腸症候群 (IBS)');
+    assert.ok(ibsRec.includes('CRP'));
+    const spineRec = recommendItemCodesForConditions('脊柱管狭窄症・坐骨神経痛');
+    assert.ok(spineRec.includes('CRP'));
+    assert.ok(spineRec.includes('Cr'));
+
+    // 未登録の病名を自動検出し、採血関連項目を提案できる
+    const unmatched = findUnmatchedConditionTerms('潰瘍性大腸炎、サルコイドーシス病');
+    assert.deepEqual(unmatched, ['サルコイドーシス病']);
+    const sug = suggestItemCodesForUnknownCondition('サルコイドーシス病');
+    assert.ok(sug);
+    assert.ok(sug!.suggested_codes.includes('CRP'));
 
     // 未設定時は持病おすすめ (UA) が最上位に来る
     const autoVisible = resolveVisibleItemCodes('高尿酸血症（痛風）', []);
@@ -1159,5 +1181,66 @@ describe('本番ログイン・初回Owner・招待制・SNS後追い連携 (wor
     ).json()) as { account: AccountSummary; records: LabRecord[] };
     assert.equal(memberAfterDel.account.authenticated, false);
     assert.equal(memberAfterDel.records.length, 0);
+  });
+
+  it('持病・症状カスタムマスタ API（自動提案・後追い登録・削除）が正常動作する', async () => {
+    // 1. 未登録病名の自動提案
+    const sugRes = await worker.fetch(
+      new Request('http://localhost/api/condition-rules/suggest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chronic_conditions: '潰瘍性大腸炎、肋間神経痛' }),
+      }),
+      {}
+    );
+    assert.equal(sugRes.status, 200);
+    const sugData = (await sugRes.json()) as {
+      unmatched: string[];
+      suggestions: Array<{ term: string; suggested_codes: string[] }>;
+    };
+    assert.deepEqual(sugData.unmatched, ['肋間神経痛']);
+    assert.equal(sugData.suggestions.length, 1);
+    assert.ok(sugData.suggestions[0].suggested_codes.includes('CRP'));
+
+    // 2. 後追いマスタ登録
+    const createRes = await worker.fetch(
+      new Request('http://localhost/api/condition-rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          label: '肋間神経痛',
+          keywords: ['肋間神経痛'],
+          codes: ['CRP', 'AST', 'Cr'],
+          source: 'auto_suggested',
+        }),
+      }),
+      {}
+    );
+    assert.equal(createRes.status, 201);
+    const created = (await createRes.json()) as { rule: { id: number; label: string }; rules: unknown[] };
+    assert.equal(created.rule.label, '肋間神経痛');
+    assert.equal(created.rules.length, 1);
+
+    // 3. 登録後は未登録リストから消える
+    const sugRes2 = await worker.fetch(
+      new Request('http://localhost/api/condition-rules/suggest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chronic_conditions: '潰瘍性大腸炎、肋間神経痛' }),
+      }),
+      {}
+    );
+    const sugData2 = (await sugRes2.json()) as { unmatched: string[] };
+    assert.equal(sugData2.unmatched.length, 0);
+
+    // 4. 削除できる
+    const delRes = await worker.fetch(
+      new Request(`http://localhost/api/condition-rules/${created.rule.id}`, { method: 'DELETE' }),
+      {}
+    );
+    assert.equal(delRes.status, 200);
+    const delData = (await delRes.json()) as { deleted: boolean; rules: unknown[] };
+    assert.equal(delData.deleted, true);
+    assert.equal(delData.rules.length, 0);
   });
 });

@@ -1,10 +1,14 @@
 import {
   REFERENCE_STANDARDS,
   computeFlag,
+  findUnmatchedConditionTerms,
   parseVisibleItemCodes,
+  suggestItemCodesForUnknownCondition,
   type AccountSummary,
   type AiProviderName,
   type BiologicalSex,
+  type ConditionItemRule,
+  type ConditionRuleSuggestion,
   type LabItem,
   type LabRecord,
   type PlanTier,
@@ -390,14 +394,17 @@ export function createSeedRecords(profile: UserProfile): LabRecord[] {
 }
 
 type StoredLabRecord = LabRecord & { user_id?: number };
+type StoredConditionRule = ConditionItemRule & { id: number; user_id: number };
 
 interface MemoryStoreState {
   profile: UserProfile;
   profilesByUserId: Map<number, UserProfile>;
   account: AccountSummary;
   records: StoredLabRecord[];
+  conditionRules: StoredConditionRule[];
   nextRecordId: number;
   nextItemId: number;
+  nextRuleId: number;
 }
 
 function createInitialMemoryState(): MemoryStoreState {
@@ -416,8 +423,10 @@ function createInitialMemoryState(): MemoryStoreState {
     profilesByUserId,
     account,
     records,
+    conditionRules: [],
     nextRecordId: maxRecordId + 1,
     nextItemId: maxItemId + 1,
+    nextRuleId: 1,
   };
 }
 
@@ -541,6 +550,20 @@ export async function ensureD1Schema(db: D1DatabaseLike): Promise<void> {
   } catch {
     // 既に存在する場合は無視
   }
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS condition_item_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        label TEXT NOT NULL,
+        keywords TEXT NOT NULL,
+        item_codes TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'manual',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`
+    )
+    .run();
 
   await db
     .prepare(
@@ -964,6 +987,31 @@ async function insertRecordIntoD1(
   };
 }
 
+async function getConditionRulesFromD1(
+  db: D1DatabaseLike,
+  userId: number
+): Promise<ConditionItemRule[]> {
+  try {
+    const res = await db
+      .prepare('SELECT * FROM condition_item_rules WHERE user_id = ? ORDER BY id DESC')
+      .bind(userId)
+      .all<Record<string, unknown>>();
+    return (res.results || []).map((r) => ({
+      id: Number(r.id),
+      label: String(r.label || ''),
+      keywords: String(r.keywords || '')
+        .split(/[,、\n]+/)
+        .map((s) => s.trim())
+        .filter(Boolean),
+      codes: parseVisibleItemCodes(r.item_codes),
+      source: r.source === 'auto_suggested' ? 'auto_suggested' : 'manual',
+      created_at: String(r.created_at || ''),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 async function getRepositoryData(
   env: WorkerEnv,
   request?: Request
@@ -974,6 +1022,7 @@ async function getRepositoryData(
   profile: UserProfile;
   account: AccountSummary;
   records: LabRecord[];
+  conditionRules: ConditionItemRule[];
 }> {
   if (env.DB) {
     await ensureD1Ready(env.DB, env);
@@ -986,11 +1035,13 @@ async function getRepositoryData(
         profile: createBlankProfileForUser('ゲスト', 0),
         account: sessionCtx.account,
         records: [],
+        conditionRules: [],
       };
     }
     const userId = sessionCtx.user.id;
     const profile = await getProfileFromD1(env.DB, userId, sessionCtx.user.display_name);
     const records = await getRecordsFromD1(env.DB, userId);
+    const conditionRules = await getConditionRulesFromD1(env.DB, userId);
     return {
       useD1: true,
       authenticated: true,
@@ -998,6 +1049,7 @@ async function getRepositoryData(
       profile,
       account: sessionCtx.account,
       records,
+      conditionRules,
     };
   }
 
@@ -1010,6 +1062,7 @@ async function getRepositoryData(
       profile: createBlankProfileForUser('ゲスト', 0),
       account: sessionCtx.account,
       records: [],
+      conditionRules: [],
     };
   }
 
@@ -1028,6 +1081,13 @@ async function getRepositoryData(
       ...rest,
       items: rest.items.map((i) => ({ ...i })),
     }));
+  const userRules = memoryStore.conditionRules
+    .filter((r) => r.user_id === userId)
+    .map(({ user_id: _uid, ...rest }) => ({
+      ...rest,
+      keywords: [...rest.keywords],
+      codes: [...rest.codes],
+    }));
   return {
     useD1: false,
     authenticated: true,
@@ -1035,6 +1095,7 @@ async function getRepositoryData(
     profile: { ...profile },
     account: sessionCtx.account,
     records: userRecords,
+    conditionRules: userRules,
   };
 }
 
@@ -1202,6 +1263,9 @@ export default {
             } else {
               memoryStore.profilesByUserId.delete(targetUserId);
               memoryStore.records = memoryStore.records.filter((r) => (r.user_id ?? 1) !== targetUserId);
+              memoryStore.conditionRules = memoryStore.conditionRules.filter(
+                (r) => r.user_id !== targetUserId
+              );
             }
           },
         });
@@ -1215,17 +1279,154 @@ export default {
         if (request.method !== 'GET') {
           return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
         }
-        const { profile, account, records } = await getRepositoryData(env, request);
+        const { profile, account, records, conditionRules } = await getRepositoryData(env, request);
         return jsonResponse(
           {
             profile,
             account,
             records,
+            condition_rules: conditionRules,
             standards: REFERENCE_STANDARDS,
             providers: SUPPORTED_PROVIDERS,
           },
           requestId
         );
+      }
+
+      // 1.5 Condition Item Rules (持病・症状→関連検査項目の後追いカスタムマスタ)
+      if (path === '/api/condition-rules') {
+        const repo = await getRepositoryData(env, request);
+        if (!repo.authenticated || repo.userId === null) {
+          return createErrorResponse('AUTH_SESSION_REQUIRED', requestId, { route: path });
+        }
+
+        if (request.method === 'GET') {
+          return jsonResponse({ rules: repo.conditionRules }, requestId);
+        }
+
+        if (request.method === 'POST') {
+          const secErr = verifyMutationSecurityHeaders(request, repo.account.csrf_token, requestId, path);
+          if (secErr) return secErr;
+
+          const parsed = await parseJsonBody<{
+            label?: unknown;
+            keywords?: unknown;
+            codes?: unknown;
+            source?: unknown;
+          }>(request, requestId, path);
+          if (parsed.errorResponse) return parsed.errorResponse;
+          const body = parsed.data!;
+
+          const label = typeof body.label === 'string' ? body.label.trim().slice(0, 80) : '';
+          const rawKeywords = Array.isArray(body.keywords)
+            ? body.keywords.map((k) => String(k ?? '').trim()).filter(Boolean)
+            : typeof body.keywords === 'string'
+              ? body.keywords
+                  .split(/[,、・\n]+/)
+                  .map((k) => k.trim())
+                  .filter(Boolean)
+              : [];
+          const keywords = rawKeywords.length > 0 ? rawKeywords : label ? [label] : [];
+          const codes = parseVisibleItemCodes(body.codes);
+          const source: 'manual' | 'auto_suggested' =
+            body.source === 'auto_suggested' ? 'auto_suggested' : 'manual';
+
+          if (!label || keywords.length === 0 || codes.length === 0) {
+            return createErrorResponse('REQUEST_INVALID', requestId, { route: path });
+          }
+
+          const nowIso = new Date().toISOString();
+          if (repo.useD1 && env.DB) {
+            const ins = await env.DB.prepare(
+              `INSERT INTO condition_item_rules (user_id, label, keywords, item_codes, source, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)`
+            )
+              .bind(repo.userId, label, keywords.join(','), codes.join(','), source, nowIso)
+              .run();
+            const saved: ConditionItemRule = {
+              id: Number(ins.meta?.last_row_id || Date.now()),
+              label,
+              keywords,
+              codes,
+              source,
+              created_at: nowIso,
+            };
+            const rules = await getConditionRulesFromD1(env.DB, repo.userId);
+            return jsonResponse({ rule: saved, rules }, requestId, 201);
+          }
+
+          const savedRule: StoredConditionRule = {
+            id: memoryStore.nextRuleId++,
+            user_id: repo.userId,
+            label,
+            keywords,
+            codes,
+            source,
+            created_at: nowIso,
+          };
+          memoryStore.conditionRules.unshift(savedRule);
+          const { user_id: _uid, ...publicSaved } = savedRule;
+          const rules = memoryStore.conditionRules
+            .filter((r) => r.user_id === repo.userId)
+            .map(({ user_id: _u, ...rest }) => rest);
+          return jsonResponse({ rule: publicSaved, rules }, requestId, 201);
+        }
+
+        return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
+      }
+
+      if (path === '/api/condition-rules/suggest') {
+        if (request.method !== 'POST') {
+          return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
+        }
+        const repo = await getRepositoryData(env, request);
+        if (!repo.authenticated || repo.userId === null) {
+          return createErrorResponse('AUTH_SESSION_REQUIRED', requestId, { route: path });
+        }
+        const parsed = await parseJsonBody<{ chronic_conditions?: unknown }>(request, requestId, path);
+        if (parsed.errorResponse) return parsed.errorResponse;
+        const conditionsText =
+          typeof parsed.data?.chronic_conditions === 'string'
+            ? parsed.data.chronic_conditions
+            : repo.profile.chronic_conditions;
+
+        const unmatched = findUnmatchedConditionTerms(conditionsText, repo.conditionRules);
+        const suggestions: ConditionRuleSuggestion[] = [];
+        for (const term of unmatched) {
+          const s = suggestItemCodesForUnknownCondition(term);
+          if (s) suggestions.push(s);
+        }
+        return jsonResponse({ unmatched, suggestions }, requestId);
+      }
+
+      const deleteRuleMatch = path.match(/^\/api\/condition-rules\/(\d+)$/);
+      if (deleteRuleMatch) {
+        if (request.method !== 'DELETE') {
+          return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
+        }
+        const repo = await getRepositoryData(env, request);
+        if (!repo.authenticated || repo.userId === null) {
+          return createErrorResponse('AUTH_SESSION_REQUIRED', requestId, { route: path });
+        }
+        const secErr = verifyMutationSecurityHeaders(request, repo.account.csrf_token, requestId, path);
+        if (secErr) return secErr;
+
+        const targetRuleId = Number(deleteRuleMatch[1]);
+        if (repo.useD1 && env.DB) {
+          await env.DB.prepare('DELETE FROM condition_item_rules WHERE id = ? AND user_id = ?')
+            .bind(targetRuleId, repo.userId)
+            .run();
+          const rules = await getConditionRulesFromD1(env.DB, repo.userId);
+          return jsonResponse({ deleted: true, id: targetRuleId, rules }, requestId);
+        }
+
+        memoryStore.conditionRules = memoryStore.conditionRules.filter(
+          (r) => !(r.id === targetRuleId && r.user_id === repo.userId)
+        );
+        const rules = memoryStore.conditionRules
+          .filter((r) => r.user_id === repo.userId)
+          .map(({ user_id: _u, ...rest }) => rest);
+        return jsonResponse({ deleted: true, id: targetRuleId, rules }, requestId);
       }
 
       // 2. PUT /api/profile (also accept POST /api/profile)

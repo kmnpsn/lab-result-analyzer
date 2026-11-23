@@ -8,6 +8,9 @@ import {
   AuthProviderId,
   AuthProviderMeta,
   BiologicalSex,
+  ConditionItemRule,
+  ConditionRuleSuggestion,
+  DEFAULT_CONDITION_ITEM_RULES,
   InvitationSummary,
   LabFlag,
   LabItem,
@@ -138,7 +141,16 @@ export class AppComponent implements OnInit {
   readonly wellnessMetrics = WELLNESS_METRICS;
   readonly symptomTagPresets = SYMPTOM_TAG_PRESETS;
   readonly authProviders = AUTH_PROVIDERS;
-  readonly quickChartCodes = ['Hb', 'CRP', 'Ferritin', 'ALT', 'eGFR', 'HbA1c', 'WBC', 'TSH', 'LDL'];
+  readonly defaultConditionRules = DEFAULT_CONDITION_ITEM_RULES;
+  readonly quickChartCodes = ['Hb', 'CRP', 'Ferritin', 'ALT', 'eGFR', 'UA', 'HbA1c', 'WBC', 'TSH', 'LDL'];
+
+  // 持病・症状→検査項目の後追いカスタムマスタ & 自動提案
+  conditionRules: ConditionItemRule[] = [];
+  conditionSuggestions: ConditionRuleSuggestion[] = [];
+  newRuleLabel = '';
+  newRuleKeywords = '';
+  newRuleCodes: string[] = ['CRP', 'WBC'];
+  savingConditionRule = false;
 
   // 招待URLバナー & 認証エラー通知
   inviteToken: string | null = null;
@@ -285,6 +297,11 @@ export class AppComponent implements OnInit {
       this.providers = data.providers;
       if (data.account) {
         this.account = data.account;
+      }
+      this.conditionRules = data.condition_rules ?? [];
+      this.conditionSuggestions = [];
+      if (this.account.authenticated && (this.profile.chronic_conditions || '').trim()) {
+        void this.refreshConditionSuggestions(this.profile.chronic_conditions);
       }
 
       if (this.records.length > 0) {
@@ -517,14 +534,16 @@ export class AppComponent implements OnInit {
 
   get recommendedItemCodes(): string[] {
     return recommendItemCodesForConditions(
-      this.profileForm.chronic_conditions || this.profile.chronic_conditions || ''
+      this.profileForm.chronic_conditions || this.profile.chronic_conditions || '',
+      this.conditionRules
     );
   }
 
   get activeVisibleItemCodes(): string[] {
     return resolveVisibleItemCodes(
       this.profile.chronic_conditions || '',
-      this.profile.visible_item_codes
+      this.profile.visible_item_codes,
+      this.conditionRules
     );
   }
 
@@ -557,7 +576,10 @@ export class AppComponent implements OnInit {
 
   private syncSelectedChartAndPreset(): void {
     const visible = this.activeVisibleItemCodes;
-    const rec = recommendItemCodesForConditions(this.profile.chronic_conditions || '');
+    const rec = recommendItemCodesForConditions(
+      this.profile.chronic_conditions || '',
+      this.conditionRules
+    );
     const preferredTop = rec.find((c) => visible.includes(c)) || visible[0] || 'Hb';
     const availableCodes = this.availableChartCodes.map((c) => c.code);
     if (!availableCodes.includes(this.selectedChartCode) || (this.records.length === 0 && rec.length > 0)) {
@@ -1223,7 +1245,7 @@ export class AppComponent implements OnInit {
 
       // 持病メモが変更された場合、新しく該当したおすすめ項目を自動的に表示 ON に組み込む
       if (prevConditions !== nextConditions) {
-        const newlyRecommended = recommendItemCodesForConditions(nextConditions);
+        const newlyRecommended = recommendItemCodesForConditions(nextConditions, this.conditionRules);
         if (newlyRecommended.length > 0 && nextVisibleCodes.length > 0) {
           const merged = [...newlyRecommended];
           for (const c of nextVisibleCodes) {
@@ -1243,7 +1265,10 @@ export class AppComponent implements OnInit {
       this.profileForm = { ...updated };
 
       // 持病・表示設定の変化をグラフと入力フォームに即時反映
-      const recTop = recommendItemCodesForConditions(updated.chronic_conditions || '')[0];
+      const recTop = recommendItemCodesForConditions(
+        updated.chronic_conditions || '',
+        this.conditionRules
+      )[0];
       if (prevConditions !== nextConditions && recTop) {
         this.selectedChartCode = recTop;
         this.presetToAdd = recTop;
@@ -1251,6 +1276,9 @@ export class AppComponent implements OnInit {
       } else {
         this.syncSelectedChartAndPreset();
       }
+
+      // 未登録の病名・症状があれば採血関連項目候補を自動検知して提案
+      await this.refreshConditionSuggestions(updated.chronic_conditions || '');
 
       // 性別変更に合わせて登録フォームの基準値も再適用
       for (const it of this.formItems) {
@@ -1292,8 +1320,8 @@ export class AppComponent implements OnInit {
   async applyRecommendedVisibleItems(): Promise<void> {
     if (this.saving) return;
     const conditions = this.profileForm.chronic_conditions || this.profile.chronic_conditions || '';
-    const rec = recommendItemCodesForConditions(conditions);
-    const next = resolveVisibleItemCodes(conditions, null);
+    const rec = recommendItemCodesForConditions(conditions, this.conditionRules);
+    const next = resolveVisibleItemCodes(conditions, null, this.conditionRules);
     await this.persistVisibleItemCodes(
       next,
       rec.length > 0
@@ -1301,6 +1329,122 @@ export class AppComponent implements OnInit {
         : '標準の表示項目セットを反映しました',
       conditions
     );
+  }
+
+  async refreshConditionSuggestions(chronicConditions: string): Promise<void> {
+    if (!chronicConditions.trim()) {
+      this.conditionSuggestions = [];
+      return;
+    }
+    try {
+      const res = await this.api.suggestConditionRules(chronicConditions, this.conditionRules);
+      this.conditionSuggestions = res.suggestions || [];
+    } catch {
+      this.conditionSuggestions = [];
+    }
+  }
+
+  toggleNewRuleCode(code: string): void {
+    if (this.newRuleCodes.includes(code)) {
+      this.newRuleCodes = this.newRuleCodes.filter((c) => c !== code);
+    } else {
+      this.newRuleCodes = [...this.newRuleCodes, code];
+    }
+  }
+
+  async acceptConditionSuggestion(suggestion: ConditionRuleSuggestion): Promise<void> {
+    if (this.savingConditionRule) return;
+    this.savingConditionRule = true;
+    try {
+      const res = await this.api.createConditionRule({
+        label: suggestion.term,
+        keywords: [suggestion.term],
+        codes: suggestion.suggested_codes,
+        source: 'auto_suggested',
+      });
+      this.conditionRules = res.rules;
+      this.conditionSuggestions = this.conditionSuggestions.filter((s) => s.term !== suggestion.term);
+
+      // 登録した関連項目を表示 ON リストへ自動統合
+      const current = [...this.activeVisibleItemCodes];
+      const merged = [...suggestion.suggested_codes];
+      for (const c of current) {
+        if (!merged.includes(c)) merged.push(c);
+      }
+      await this.persistVisibleItemCodes(
+        merged,
+        `「${suggestion.term}」をマスタに登録し、関連項目（${suggestion.suggested_codes.join(', ')}）を反映しました`
+      );
+    } catch (err) {
+      if (!this.isServicePaused) {
+        this.showToast(this.api.getErrorMessage(err, 'write'), 'error');
+      }
+    } finally {
+      this.savingConditionRule = false;
+    }
+  }
+
+  dismissConditionSuggestion(term: string): void {
+    this.conditionSuggestions = this.conditionSuggestions.filter((s) => s.term !== term);
+  }
+
+  async addCustomConditionRule(): Promise<void> {
+    if (this.savingConditionRule) return;
+    const label = this.newRuleLabel.trim();
+    if (!label) {
+      this.showToast('病名または症状名を入力してください', 'error');
+      return;
+    }
+    if (this.newRuleCodes.length === 0) {
+      this.showToast('関連付ける検査項目を1つ以上選択してください', 'error');
+      return;
+    }
+    const keywords = this.newRuleKeywords
+      .split(/[,、・\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!keywords.includes(label)) {
+      keywords.unshift(label);
+    }
+    this.savingConditionRule = true;
+    try {
+      const res = await this.api.createConditionRule({
+        label,
+        keywords,
+        codes: this.newRuleCodes,
+        source: 'manual',
+      });
+      this.conditionRules = res.rules;
+      this.newRuleLabel = '';
+      this.newRuleKeywords = '';
+      this.syncSelectedChartAndPreset();
+      this.initDefaultFormItems();
+      await this.refreshConditionSuggestions(this.profile.chronic_conditions || '');
+      this.showToast(`「${label}」をカスタムマスタに登録しました`, 'success');
+    } catch (err) {
+      if (!this.isServicePaused) {
+        this.showToast(this.api.getErrorMessage(err, 'write'), 'error');
+      }
+    } finally {
+      this.savingConditionRule = false;
+    }
+  }
+
+  async deleteCustomConditionRule(rule: ConditionItemRule): Promise<void> {
+    if (!rule.id || this.savingConditionRule) return;
+    this.savingConditionRule = true;
+    try {
+      const res = await this.api.deleteConditionRule(rule.id);
+      this.conditionRules = res.rules;
+      this.syncSelectedChartAndPreset();
+      this.showToast(`「${rule.label}」をマスタから削除しました`, 'info');
+    } catch (err) {
+      if (!this.isServicePaused) {
+        this.showToast(this.api.getErrorMessage(err, 'delete'), 'error');
+      }
+    } finally {
+      this.savingConditionRule = false;
+    }
   }
 
   async showAllVisibleItems(): Promise<void> {

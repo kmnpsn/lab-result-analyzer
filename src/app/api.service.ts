@@ -4,6 +4,8 @@ import {
   AiProviderName,
   AuthProviderId,
   BiologicalSex,
+  ConditionItemRule,
+  ConditionRuleSuggestion,
   InvitationSummary,
   LabItem,
   LabRecord,
@@ -12,7 +14,9 @@ import {
   ReferenceStandard,
   UserProfile,
   computeFlag,
+  findUnmatchedConditionTerms,
   lookupStandard,
+  suggestItemCodesForUnknownCondition,
 } from '../shared/types';
 import {
   AppErrorCode,
@@ -49,6 +53,7 @@ export interface BootstrapResponse {
   standards: ReferenceStandard[];
   providers: AiProviderName[];
   account?: AccountSummary;
+  condition_rules?: ConditionItemRule[];
 }
 
 export interface AiClientConfig {
@@ -317,6 +322,7 @@ export class ApiService {
         standards: data.standards?.length ? data.standards : REFERENCE_STANDARDS,
         providers: data.providers?.length ? data.providers : ['gemini', 'openai', 'claude'],
         account,
+        condition_rules: data.condition_rules ?? [],
       };
     } catch (err) {
       if (!this.shouldFallbackOffline(err)) {
@@ -800,6 +806,91 @@ export class ApiService {
         // ignore
       }
       return { deleted: true, reset_demo: true };
+    }
+  }
+
+  // ===== 持病・症状→関連検査項目 カスタムマスタ =====
+
+  async createConditionRule(params: {
+    label: string;
+    keywords: string[];
+    codes: string[];
+    source?: 'manual' | 'auto_suggested';
+  }): Promise<{ rule: ConditionItemRule; rules: ConditionItemRule[] }> {
+    try {
+      const res = await this.fetchJson<{ rule: ConditionItemRule; rules: ConditionItemRule[] }>(
+        '/api/condition-rules',
+        {
+          method: 'POST',
+          body: JSON.stringify(params),
+        },
+        'write'
+      );
+      this.isOffline = false;
+      return res;
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
+      this.isOffline = true;
+      const rule: ConditionItemRule = {
+        id: Date.now(),
+        label: params.label.trim(),
+        keywords: params.keywords,
+        codes: params.codes,
+        source: params.source || 'manual',
+        created_at: new Date().toISOString(),
+      };
+      return { rule, rules: [rule] };
+    }
+  }
+
+  async deleteConditionRule(id: number): Promise<{ deleted: boolean; rules: ConditionItemRule[] }> {
+    try {
+      const res = await this.fetchJson<{ deleted: boolean; rules: ConditionItemRule[] }>(
+        `/api/condition-rules/${id}`,
+        { method: 'DELETE' },
+        'delete'
+      );
+      this.isOffline = false;
+      return res;
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
+      this.isOffline = true;
+      return { deleted: true, rules: [] };
+    }
+  }
+
+  async suggestConditionRules(
+    chronicConditions: string,
+    existingCustomRules: ConditionItemRule[] = []
+  ): Promise<{ unmatched: string[]; suggestions: ConditionRuleSuggestion[] }> {
+    try {
+      const res = await this.fetchJson<{
+        unmatched: string[];
+        suggestions: ConditionRuleSuggestion[];
+      }>(
+        '/api/condition-rules/suggest',
+        {
+          method: 'POST',
+          body: JSON.stringify({ chronic_conditions: chronicConditions }),
+        },
+        'read'
+      );
+      this.isOffline = false;
+      return res;
+    } catch (err) {
+      if (!this.shouldFallbackOffline(err)) {
+        throw err;
+      }
+      this.isOffline = true;
+      const unmatched = findUnmatchedConditionTerms(chronicConditions, existingCustomRules);
+      const suggestions = unmatched
+        .map((t) => suggestItemCodesForUnknownCondition(t))
+        .filter((s): s is ConditionRuleSuggestion => s !== null);
+      return { unmatched, suggestions };
     }
   }
 }
