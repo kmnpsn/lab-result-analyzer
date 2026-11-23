@@ -925,9 +925,9 @@
             <div class="preset-toolbar">
               <div class="preset-select-group">
                 <select [(ngModel)]="presetToAdd" aria-label="標準項目プリセット">
-                  @for (std of standards; track std.code) {
+                  @for (std of presetStandardsForForm; track std.code) {
                     <option [value]="std.code">
-                      {{ std.code }} - {{ std.name }} ({{ std.unit }})
+                      {{ isItemRecommended(std.code) ? '★ ' : '' }}{{ std.code }} - {{ std.name }} ({{ std.unit }})
                     </option>
                   }
                 </select>
@@ -1676,12 +1676,32 @@
           }
         </div>
 
-        <!-- 基準値マスタ一覧 -->
+        <!-- 基準値マスタ一覧（表示/非表示カスタマイズ & 持病おすすめ連動） -->
         <section class="panel">
           <div class="panel-header">
             <div>
-              <h2>基準値の目安一覧（{{ getSexLabel(profileForm.sex) }}）</h2>
-              <p class="panel-desc">主な検査項目の一般的な基準範囲と、体調との関わりです。</p>
+              <h2>表示する検査項目と基準値の目安（{{ getSexLabel(profileForm.sex) }}）</h2>
+              <p class="panel-desc">
+                トグルを ON にした項目が、ホームのグラフ選択肢や採血記録のプリセットに表示されます。持病メモに合わせておすすめ項目が上位に表示されます。
+              </p>
+            </div>
+            <div class="standards-header-actions">
+              <button
+                type="button"
+                class="btn-secondary small-btn"
+                [disabled]="saving"
+                (click)="applyRecommendedVisibleItems()"
+              >
+                ✨ 持病メモからおすすめ反映
+              </button>
+              <button
+                type="button"
+                class="btn-ghost small-btn"
+                [disabled]="saving"
+                (click)="showAllVisibleItems()"
+              >
+                すべて表示
+              </button>
             </div>
           </div>
 
@@ -1689,6 +1709,7 @@
             <table class="standards-table">
               <thead>
                 <tr>
+                  <th>表示</th>
                   <th>カテゴリ</th>
                   <th>コード</th>
                   <th>項目名</th>
@@ -1698,11 +1719,27 @@
                 </tr>
               </thead>
               <tbody>
-                @for (std of standards; track std.code) {
-                  <tr>
+                @for (std of sortedStandardsForSettings; track std.code) {
+                  <tr [class.std-row-hidden]="!isItemVisible(std.code)">
+                    <td>
+                      <label class="item-toggle" [attr.aria-label]="std.name + ' の表示切替'">
+                        <input
+                          type="checkbox"
+                          [checked]="isItemVisible(std.code)"
+                          [disabled]="saving"
+                          (change)="toggleVisibleItem(std.code)"
+                        />
+                        <span class="item-toggle-slider"></span>
+                      </label>
+                    </td>
                     <td>{{ std.category }}</td>
                     <td><code>{{ std.code }}</code></td>
-                    <td><strong>{{ std.name }}</strong></td>
+                    <td>
+                      <strong>{{ std.name }}</strong>
+                      @if (isItemRecommended(std.code)) {
+                        <span class="rec-item-badge">★ おすすめ</span>
+                      }
+                    </td>
                     <td>
                       {{ getStandardRangeForSex(std, profileForm.sex)[0] }} 〜
                       {{ getStandardRangeForSex(std, profileForm.sex)[1] }}
@@ -1715,13 +1752,27 @@
             </table>
           </div>
 
-          <!-- スマホ用 2〜3行カード表示（文字切れなし） -->
+          <!-- スマホ用 2〜3行カード表示（文字切れなし・トグル付き） -->
           <div class="mobile-only-cards">
-            @for (std of standards; track std.code) {
-              <div class="mobile-std-card">
+            @for (std of sortedStandardsForSettings; track std.code) {
+              <div class="mobile-std-card" [class.std-row-hidden]="!isItemVisible(std.code)">
                 <div class="m-std-top">
-                  <strong>{{ std.name }}</strong>
-                  <span class="meta-chip">{{ std.category }}</span>
+                  <div class="m-std-title-wrap">
+                    <strong>{{ std.name }}</strong>
+                    @if (isItemRecommended(std.code)) {
+                      <span class="rec-item-badge">★ おすすめ</span>
+                    }
+                    <span class="meta-chip">{{ std.category }}</span>
+                  </div>
+                  <label class="item-toggle" [attr.aria-label]="std.name + ' の表示切替'">
+                    <input
+                      type="checkbox"
+                      [checked]="isItemVisible(std.code)"
+                      [disabled]="saving"
+                      (change)="toggleVisibleItem(std.code)"
+                    />
+                    <span class="item-toggle-slider"></span>
+                  </label>
                 </div>
                 <div class="m-std-range">
                   基準範囲（{{ getSexLabel(profileForm.sex) }}）:

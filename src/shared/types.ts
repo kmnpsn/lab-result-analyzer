@@ -71,6 +71,7 @@ export interface UserProfile {
   medications: string;
   preferred_provider: AiProviderName;
   preferred_model: string;
+  visible_item_codes?: string[];
   updated_at?: string;
 }
 
@@ -187,4 +188,135 @@ export function lookupStandard(codeOrName: string, sex: BiologicalSex = 'male'):
   }
   const range = found[sex] || found.other;
   return { standard: found, refLow: range[0], refHigh: range[1] };
+}
+
+export const DEFAULT_QUICK_ITEM_CODES: ReadonlyArray<string> = [
+  'Hb',
+  'CRP',
+  'Ferritin',
+  'ALT',
+  'eGFR',
+  'UA',
+  'HbA1c',
+  'WBC',
+  'TSH',
+  'LDL',
+];
+
+const CONDITION_ITEM_RULES: ReadonlyArray<{ keywords: ReadonlyArray<string>; codes: ReadonlyArray<string> }> = [
+  {
+    keywords: ['痛風', '高尿酸', '尿酸', 'gout', 'uric'],
+    codes: ['UA', 'Cr', 'eGFR', 'BUN', 'CRP'],
+  },
+  {
+    keywords: ['貧血', '鉄欠乏', 'フェリチン', 'anemia'],
+    codes: ['Hb', 'Ferritin', 'RBC', 'Ht'],
+  },
+  {
+    keywords: ['肝', '脂肪肝', '肝炎', '肝硬変', 'アルコール', 'liver'],
+    codes: ['AST', 'ALT', 'gGTP', 'Alb', 'PLT'],
+  },
+  {
+    keywords: ['腎', 'ckd', '腎不全', 'ネフローゼ', '透析', 'kidney'],
+    codes: ['Cr', 'eGFR', 'BUN', 'UA', 'Alb', 'Hb'],
+  },
+  {
+    keywords: ['糖尿', '血糖', '高血糖', 'インスリン', 'diabetes'],
+    codes: ['HbA1c', 'Glu', 'TG', 'LDL', 'Cr', 'eGFR'],
+  },
+  {
+    keywords: ['脂質', 'コレステロール', '中性脂肪', '高脂血', 'dyslipidemia'],
+    codes: ['LDL', 'HDL', 'TG', 'AST', 'ALT'],
+  },
+  {
+    keywords: ['クローン', '潰瘍性', 'ibd', '膠原病', 'リウマチ', '自己免疫', '炎症', '難病'],
+    codes: ['CRP', 'WBC', 'Alb', 'Hb', 'Ferritin', 'PLT'],
+  },
+  {
+    keywords: ['甲状腺', 'バセドウ', '橋本', 'thyroid'],
+    codes: ['TSH', 'LDL', 'AST', 'ALT'],
+  },
+  {
+    keywords: ['高血圧', '心疾患', '動脈硬化', '狭心症'],
+    codes: ['LDL', 'HDL', 'TG', 'Cr', 'eGFR', 'UA', 'HbA1c'],
+  },
+  {
+    keywords: ['疲労', '倦怠', 'だるさ'],
+    codes: ['Hb', 'Ferritin', 'TSH', 'CRP', 'ALT'],
+  },
+];
+
+/**
+ * 持病メモ（chronic_conditions）から優先的に確認したい検査項目コードを抽出する
+ */
+export function recommendItemCodesForConditions(chronicConditions: string): string[] {
+  const normalized = (chronicConditions || '').toLowerCase();
+  if (!normalized.trim()) return [];
+  const validCodes = new Set(REFERENCE_STANDARDS.map((s) => s.code));
+  const result: string[] = [];
+  for (const rule of CONDITION_ITEM_RULES) {
+    if (rule.keywords.some((kw) => normalized.includes(kw.toLowerCase()))) {
+      for (const code of rule.codes) {
+        if (validCodes.has(code) && !result.includes(code)) {
+          result.push(code);
+        }
+      }
+    }
+  }
+  return result;
+}
+
+export function parseVisibleItemCodes(raw: unknown): string[] {
+  const validCodes = new Set(REFERENCE_STANDARDS.map((s) => s.code));
+  let list: string[] = [];
+  if (Array.isArray(raw)) {
+    list = raw.map((v) => String(v ?? '').trim());
+  } else if (typeof raw === 'string' && raw.trim()) {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          list = parsed.map((v) => String(v ?? '').trim());
+        }
+      } catch {
+        list = trimmed.split(/[,、\s]+/);
+      }
+    } else {
+      list = trimmed.split(/[,、\s]+/);
+    }
+  }
+  const deduped: string[] = [];
+  for (const code of list) {
+    if (validCodes.has(code) && !deduped.includes(code)) {
+      deduped.push(code);
+    }
+  }
+  return deduped;
+}
+
+/**
+ * 持病おすすめとユーザーの表示ON/OFF設定を合成して、優先順に並んだ表示対象コード一覧を返す
+ */
+export function resolveVisibleItemCodes(
+  chronicConditions: string,
+  savedVisibleCodes?: string[] | null
+): string[] {
+  const recommended = recommendItemCodesForConditions(chronicConditions);
+  const cleanedSaved = parseVisibleItemCodes(savedVisibleCodes);
+  if (cleanedSaved.length > 0) {
+    // ユーザー設定を尊重しつつ、その中に含まれる持病おすすめ項目を先頭に並べる
+    const savedSet = new Set(cleanedSaved);
+    const prioritized = recommended.filter((c) => savedSet.has(c));
+    const rest = cleanedSaved.filter((c) => !prioritized.includes(c));
+    return [...prioritized, ...rest];
+  }
+  // 未設定時は「持病おすすめ」を最上位にし、基本項目を続ける
+  const merged = [...recommended];
+  for (const code of DEFAULT_QUICK_ITEM_CODES) {
+    if (!merged.includes(code)) {
+      merged.push(code);
+    }
+  }
+  return merged;
 }

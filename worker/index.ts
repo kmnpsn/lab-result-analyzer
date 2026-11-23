@@ -1,6 +1,7 @@
 import {
   REFERENCE_STANDARDS,
   computeFlag,
+  parseVisibleItemCodes,
   type AccountSummary,
   type AiProviderName,
   type BiologicalSex,
@@ -527,10 +528,19 @@ export async function ensureD1Schema(db: D1DatabaseLike): Promise<void> {
         medications TEXT NOT NULL DEFAULT '',
         preferred_provider TEXT NOT NULL DEFAULT 'gemini',
         preferred_model TEXT NOT NULL DEFAULT '',
+        visible_item_codes TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       )`
     )
     .run();
+
+  try {
+    await db
+      .prepare(`ALTER TABLE user_profiles ADD COLUMN visible_item_codes TEXT NOT NULL DEFAULT ''`)
+      .run();
+  } catch {
+    // 既に存在する場合は無視
+  }
 
   await db
     .prepare(
@@ -740,6 +750,7 @@ async function getProfileFromD1(
       medications: String(row.medications || ''),
       preferred_provider: (row.preferred_provider as AiProviderName) || 'gemini',
       preferred_model: String(row.preferred_model || 'gemini-2.5-flash'),
+      visible_item_codes: parseVisibleItemCodes(row.visible_item_codes),
       updated_at: String(row.updated_at || ''),
     };
   }
@@ -775,11 +786,12 @@ async function upsertProfileToD1(
   userId: number,
   updated: UserProfile
 ): Promise<void> {
+  const visibleCodesStr = parseVisibleItemCodes(updated.visible_item_codes).join(',');
   await db
     .prepare(
       `INSERT INTO user_profiles
-       (user_id, name, birth_year, age, sex, height_cm, chronic_conditions, medications, preferred_provider, preferred_model, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       (user_id, name, birth_year, age, sex, height_cm, chronic_conditions, medications, preferred_provider, preferred_model, visible_item_codes, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
          name = excluded.name,
          birth_year = excluded.birth_year,
@@ -790,6 +802,7 @@ async function upsertProfileToD1(
          medications = excluded.medications,
          preferred_provider = excluded.preferred_provider,
          preferred_model = excluded.preferred_model,
+         visible_item_codes = excluded.visible_item_codes,
          updated_at = excluded.updated_at`
     )
     .bind(
@@ -803,6 +816,7 @@ async function upsertProfileToD1(
       updated.medications,
       updated.preferred_provider,
       updated.preferred_model,
+      visibleCodesStr,
       updated.updated_at
     )
     .run();
@@ -1263,6 +1277,10 @@ export default {
           preferred_provider: validProvider,
           preferred_model:
             body.preferred_model !== undefined ? String(body.preferred_model) : currentProfile.preferred_model,
+          visible_item_codes:
+            body.visible_item_codes !== undefined
+              ? parseVisibleItemCodes(body.visible_item_codes)
+              : currentProfile.visible_item_codes || [],
           updated_at: new Date().toISOString(),
         };
 

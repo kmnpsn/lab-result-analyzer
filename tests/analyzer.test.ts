@@ -5,6 +5,8 @@ import {
   REFERENCE_STANDARDS,
   computeFlag,
   lookupStandard,
+  recommendItemCodesForConditions,
+  resolveVisibleItemCodes,
   type AccountSummary,
   type LabRecord,
 } from '../src/shared/types.ts';
@@ -50,6 +52,21 @@ describe('基準値マスタ・H/N/L 判定ロジック (src/shared/types.ts)', 
     assert.equal(ferritin.standard?.code, 'Ferritin');
     assert.equal(ferritin.refLow, 12);
     assert.equal(ferritin.refHigh, 120);
+  });
+
+  it('持病メモ（高尿酸血症・痛風など）から関連検査項目（UA 等）を優先抽出し、表示項目カスタマイズと合成できる', () => {
+    const goutRec = recommendItemCodesForConditions('高尿酸血症（痛風）');
+    assert.equal(goutRec[0], 'UA');
+    assert.ok(goutRec.includes('Cr'));
+    assert.ok(goutRec.includes('eGFR'));
+
+    // 未設定時は持病おすすめ (UA) が最上位に来る
+    const autoVisible = resolveVisibleItemCodes('高尿酸血症（痛風）', []);
+    assert.equal(autoVisible[0], 'UA');
+
+    // ユーザーがトグルで絞った場合、その設定を尊重しつつ持病おすすめを上位に並べる
+    const customVisible = resolveVisibleItemCodes('高尿酸血症（痛風）', ['HbA1c', 'UA', 'ALT']);
+    assert.deepEqual(customVisible, ['UA', 'HbA1c', 'ALT']);
   });
 });
 

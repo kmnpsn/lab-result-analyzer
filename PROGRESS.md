@@ -33,3 +33,7 @@
    - `worker/index.ts` で本番モード（`AUTH_MODE=production`）時のデモユーザー・サンプルデータ自動シードおよび未ログイン時のデモアカウントフォールバックを廃止し、全記録・プロフィール・削除・エクスポートを `user_id` 単位で完全分離。
    - `DELETE /api/auth/account` で該当ユーザーの D1 全データ（`lab_items`, `lab_records`, `user_profiles`, `invitations`, `auth_sessions`, `auth_identities`, `users`）を確実に削除するよう修正。
    - フロントエンドに本番未ログイン時のログインゲート画面を追加。単体テスト全 6 スイート・21 件 PASS。
+9. **持病メモ連動の動的検査項目リスト & 設定画面の表示/非表示トグル（`0005` 適用）**
+   - `migrations/0005_profile_visible_items.sql` を追加し、`user_profiles.visible_item_codes` でユーザーごとの表示項目設定を D1 に永続化。
+   - 持病メモ（高尿酸血症・痛風 → `UA`, `Cr`, `eGFR` 等、10 疾患カテゴリ）から関連項目を自動抽出し、ホームのグラフ選択肢・採血記録の初期項目・プリセット一覧・CSV 出力へ動的に反映。
+   - 設定タブの基準値一覧（PC テーブル / スマホカード）に各項目ごとの表示 ON/OFF トグル、おすすめバッジ（`★ おすすめ`）、「持病メモからおすすめ反映」「すべて表示」ボタンを追加。単体テスト全 6 スイート・22 件 PASS。

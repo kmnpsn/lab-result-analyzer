@@ -20,6 +20,9 @@ import {
   UserProfile,
   computeFlag,
   lookupStandard,
+  parseVisibleItemCodes,
+  recommendItemCodesForConditions,
+  resolveVisibleItemCodes,
 } from '../shared/types';
 import { AiClientConfig, ApiService, createDefaultAccountSummary } from './api.service';
 import {
@@ -296,7 +299,8 @@ export class AppComponent implements OnInit {
           this.profile.preferred_model || PROVIDER_META[this.profile.preferred_provider].defaultModel;
       }
 
-      // 登録フォーム初期行（標準項目を3つだけ用意）
+      // 登録フォーム初期行（持病・表示設定に応じた上位項目を用意）
+      this.syncSelectedChartAndPreset();
       this.initDefaultFormItems();
       this.syncThemeColor();
     } catch (err) {
@@ -511,9 +515,62 @@ export class AppComponent implements OnInit {
 
   // ===== タブ1: ダッシュボード & 2軸チャート =====
 
+  get recommendedItemCodes(): string[] {
+    return recommendItemCodesForConditions(
+      this.profileForm.chronic_conditions || this.profile.chronic_conditions || ''
+    );
+  }
+
+  get activeVisibleItemCodes(): string[] {
+    return resolveVisibleItemCodes(
+      this.profile.chronic_conditions || '',
+      this.profile.visible_item_codes
+    );
+  }
+
+  isItemRecommended(code: string): boolean {
+    return this.recommendedItemCodes.includes(code);
+  }
+
+  isItemVisible(code: string): boolean {
+    return this.activeVisibleItemCodes.includes(code);
+  }
+
+  get sortedStandardsForSettings(): ReferenceStandard[] {
+    const rec = this.recommendedItemCodes;
+    const recIndex = new Map(rec.map((code, idx) => [code, idx]));
+    return [...this.standards].sort((a, b) => {
+      const ia = recIndex.has(a.code) ? recIndex.get(a.code)! : 999;
+      const ib = recIndex.has(b.code) ? recIndex.get(b.code)! : 999;
+      if (ia !== ib) return ia - ib;
+      return 0;
+    });
+  }
+
+  get presetStandardsForForm(): ReferenceStandard[] {
+    const visibleOrder = this.activeVisibleItemCodes;
+    const orderMap = new Map(visibleOrder.map((code, idx) => [code, idx]));
+    return this.standards
+      .filter((s) => orderMap.has(s.code))
+      .sort((a, b) => (orderMap.get(a.code) ?? 999) - (orderMap.get(b.code) ?? 999));
+  }
+
+  private syncSelectedChartAndPreset(): void {
+    const visible = this.activeVisibleItemCodes;
+    const rec = recommendItemCodesForConditions(this.profile.chronic_conditions || '');
+    const preferredTop = rec.find((c) => visible.includes(c)) || visible[0] || 'Hb';
+    const availableCodes = this.availableChartCodes.map((c) => c.code);
+    if (!availableCodes.includes(this.selectedChartCode) || (this.records.length === 0 && rec.length > 0)) {
+      this.selectedChartCode = preferredTop;
+    }
+    if (!visible.includes(this.presetToAdd)) {
+      this.presetToAdd = preferredTop;
+    }
+  }
+
   get availableChartCodes(): Array<{ code: string; name: string }> {
     const map = new Map<string, string>();
-    for (const code of this.quickChartCodes) {
+    for (const code of this.activeVisibleItemCodes) {
       const std = this.standards.find((s) => s.code === code);
       if (std) map.set(std.code, std.name);
     }
@@ -778,7 +835,9 @@ export class AppComponent implements OnInit {
   }
 
   private initDefaultFormItems(): void {
-    this.formItems = ['Hb', 'CRP', 'Ferritin'].map((code) => this.buildItemFromCode(code, 0));
+    const defaultCodes = this.activeVisibleItemCodes.slice(0, 4);
+    const codes = defaultCodes.length > 0 ? defaultCodes : ['Hb', 'CRP', 'Ferritin'];
+    this.formItems = codes.map((code) => this.buildItemFromCode(code, 0));
   }
 
   private buildItemFromCode(code: string, value: number): LabItem {
@@ -1158,13 +1217,40 @@ export class AppComponent implements OnInit {
   async saveProfile(): Promise<void> {
     this.saving = true;
     try {
+      const prevConditions = this.profile.chronic_conditions || '';
+      const nextConditions = this.profileForm.chronic_conditions || '';
+      let nextVisibleCodes = parseVisibleItemCodes(this.profileForm.visible_item_codes ?? this.profile.visible_item_codes);
+
+      // 持病メモが変更された場合、新しく該当したおすすめ項目を自動的に表示 ON に組み込む
+      if (prevConditions !== nextConditions) {
+        const newlyRecommended = recommendItemCodesForConditions(nextConditions);
+        if (newlyRecommended.length > 0 && nextVisibleCodes.length > 0) {
+          const merged = [...newlyRecommended];
+          for (const c of nextVisibleCodes) {
+            if (!merged.includes(c)) merged.push(c);
+          }
+          nextVisibleCodes = merged;
+        }
+      }
+
       const updated = await this.api.updateProfile({
         ...this.profileForm,
+        visible_item_codes: nextVisibleCodes,
         preferred_provider: this.aiConfig.provider,
         preferred_model: this.aiConfig.model,
       });
       this.profile = updated;
       this.profileForm = { ...updated };
+
+      // 持病・表示設定の変化をグラフと入力フォームに即時反映
+      const recTop = recommendItemCodesForConditions(updated.chronic_conditions || '')[0];
+      if (prevConditions !== nextConditions && recTop) {
+        this.selectedChartCode = recTop;
+        this.presetToAdd = recTop;
+        this.initDefaultFormItems();
+      } else {
+        this.syncSelectedChartAndPreset();
+      }
 
       // 性別変更に合わせて登録フォームの基準値も再適用
       for (const it of this.formItems) {
@@ -1186,13 +1272,76 @@ export class AppComponent implements OnInit {
     }
   }
 
+  async toggleVisibleItem(code: string): Promise<void> {
+    if (this.saving) return;
+    const current = [...this.activeVisibleItemCodes];
+    const exists = current.includes(code);
+    let next: string[];
+    if (exists) {
+      if (current.length <= 1) {
+        this.showToast('最低1項目は表示 ON にしてください', 'info');
+        return;
+      }
+      next = current.filter((c) => c !== code);
+    } else {
+      next = [...current, code];
+    }
+    await this.persistVisibleItemCodes(next, exists ? `${code} を非表示にしました` : `${code} を表示に追加しました`);
+  }
+
+  async applyRecommendedVisibleItems(): Promise<void> {
+    if (this.saving) return;
+    const conditions = this.profileForm.chronic_conditions || this.profile.chronic_conditions || '';
+    const rec = recommendItemCodesForConditions(conditions);
+    const next = resolveVisibleItemCodes(conditions, null);
+    await this.persistVisibleItemCodes(
+      next,
+      rec.length > 0
+        ? `持病メモからおすすめ項目（${rec.join(', ')} 等）を反映しました`
+        : '標準の表示項目セットを反映しました',
+      conditions
+    );
+  }
+
+  async showAllVisibleItems(): Promise<void> {
+    if (this.saving) return;
+    const allCodes = this.standards.map((s) => s.code);
+    await this.persistVisibleItemCodes(allCodes, `全 ${allCodes.length} 項目を表示 ON にしました`);
+  }
+
+  private async persistVisibleItemCodes(
+    codes: string[],
+    toastMsg: string,
+    updatedConditions?: string
+  ): Promise<void> {
+    this.saving = true;
+    try {
+      const payload: Partial<UserProfile> = { visible_item_codes: codes };
+      if (updatedConditions !== undefined) {
+        payload.chronic_conditions = updatedConditions;
+      }
+      const updated = await this.api.updateProfile(payload);
+      this.profile = updated;
+      this.profileForm = { ...this.profileForm, visible_item_codes: updated.visible_item_codes };
+      this.syncSelectedChartAndPreset();
+      this.initDefaultFormItems();
+      this.showToast(toastMsg, 'success');
+    } catch (err) {
+      if (!this.isServicePaused) {
+        this.showToast(this.api.getErrorMessage(err, 'write'), 'error');
+      }
+    } finally {
+      this.saving = false;
+    }
+  }
+
   exportRecordsCsv(): void {
     if (this.records.length === 0) {
       this.showToast('書き出す記録がまだありません', 'info');
       return;
     }
 
-    const majorCodes = ['WBC', 'Hb', 'Ferritin', 'CRP', 'AST', 'ALT', 'eGFR', 'HbA1c', 'LDL', 'TSH'];
+    const majorCodes = this.activeVisibleItemCodes;
     const headers = [
       '日付',
       '記録種別',
