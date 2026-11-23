@@ -2071,6 +2071,64 @@ button:disabled {
   border-color: rgba(248, 113, 113, 0.7);
 }
 
+.auth-gate-card {
+  max-width: 520px;
+  margin: 2rem auto;
+  text-align: center;
+  padding: 2rem 1.5rem;
+}
+
+.auth-gate-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.auth-gate-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #5eead4;
+  background: rgba(20, 184, 166, 0.14);
+  border: 1px solid rgba(45, 212, 191, 0.35);
+  border-radius: 999px;
+  padding: 0.25rem 0.75rem;
+}
+
+.auth-gate-title {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.auth-gate-desc {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  line-height: 1.6;
+}
+
+.auth-gate-actions {
+  width: 100%;
+  margin-top: 0.4rem;
+}
+
+.auth-gate-btn {
+  width: 100%;
+  max-width: 320px;
+  padding: 0.78rem 1.25rem;
+  font-size: 0.98rem;
+}
+
+.auth-gate-note {
+  margin: 0.25rem 0 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
 @media (max-width: 768px) {
   .desktop-title,
   .tab-nav,

@@ -24,3 +24,12 @@
 7. **Phase B 認証・招待制・SNS 後追い連携の実装 & 本番 D1（`0003`）反映**
    - `migrations/0003_auth_identities_and_invites.sql` をローカル・本番 D1 に適用。
    - `worker/auth.ts` およびフロントエンド設定タブに、初回 Owner（`BOOTSTRAP_OWNER_EMAIL`）、Google OIDC（PKCE + `__Host-` Cookie + CSRF）、1回限り招待 URL 発行・受諾（`/invite/:token`）、6種 SNS（Google / LINE / Apple ID / Yahoo! JAPAN / Facebook / Amazon）の後追い連携・解除・乗っ取り防止ガード、ログアウト、アカウント自己削除を実装し本番デプロイ完了。単体テスト全 6 スイート・20 件 PASS。
+
+## 2026-11-24: 本番 Google OIDC 実交換・ユーザー完全分離（`user_profiles` / `user_id`）・削除/リセット正常化
+
+8. **Google OIDC 本番コールバック実装・デモデータ分離・削除正常化（`0004` 適用）**
+   - `migrations/0004_user_profiles_per_user.sql` を追加し、`user_profiles` テーブルによるユーザーごとのプロフィール分離を導入。
+   - `worker/auth.ts` の `GET /api/auth/google/callback` に Google OAuth2 Token Endpoint（PKCE）への認可コード交換・ID トークン検証・OIDC `userinfo` 照合を実装。
+   - `worker/index.ts` で本番モード（`AUTH_MODE=production`）時のデモユーザー・サンプルデータ自動シードおよび未ログイン時のデモアカウントフォールバックを廃止し、全記録・プロフィール・削除・エクスポートを `user_id` 単位で完全分離。
+   - `DELETE /api/auth/account` で該当ユーザーの D1 全データ（`lab_items`, `lab_records`, `user_profiles`, `invitations`, `auth_sessions`, `auth_identities`, `users`）を確実に削除するよう修正。
+   - フロントエンドに本番未ログイン時のログインゲート画面を追加。単体テスト全 6 スイート・21 件 PASS。

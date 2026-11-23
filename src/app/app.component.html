@@ -197,6 +197,34 @@
 
     @if (loading) {
       <div class="loading-card">データを読み込み中...</div>
+    } @else if (requiresProductionLogin) {
+      <section class="panel auth-gate-card" role="region" aria-label="ログイン">
+        <div class="auth-gate-inner">
+          <div class="auth-gate-badge">🔐 ログインが必要です</div>
+          <h2 class="auth-gate-title">からだ手帳へようこそ</h2>
+          <p class="auth-gate-desc">
+            日々の体調日記と採血結果はアカウントごとに完全に分離して保存されます。
+            @if (inviteState === 'valid') {
+              招待リンクを確認済みです。下のボタンからご自身の Google アカウントで登録してください。
+            } @else {
+              Google アカウントでログインして、あなた専用のからだ手帳を開きましょう。
+            }
+          </p>
+          <div class="auth-gate-actions">
+            <button
+              type="button"
+              class="btn-primary auth-gate-btn"
+              [disabled]="authBusy"
+              (click)="startGoogleLogin(inviteState === 'valid' ? (inviteToken ?? undefined) : undefined)"
+            >
+              {{ inviteState === 'valid' ? 'Google で登録してはじめる' : 'Google アカウントでログイン' }}
+            </button>
+          </div>
+          <p class="auth-gate-note">
+            ※ 現在は招待制（クローズド運用）です。初めての方は管理者（Owner）から受け取った招待リンクからアクセスしてください。
+          </p>
+        </div>
+      </section>
     } @else {
       <!-- ===== タブ 1: ダッシュボード & 採血×体調10段階 相関グラフ ===== -->
       @if (activeTab === 'dashboard') {

@@ -217,6 +217,14 @@ export class AppComponent implements OnInit {
       if (authError === 'not_invited') {
         this.authErrorBanner =
           'この Google アカウントは招待されていません。招待リンクを受け取ったメールアドレスでログインしてください。';
+      } else if (authError === 'email_mismatch') {
+        this.authErrorBanner =
+          '招待リンクに指定されたメールアドレスと異なる Google アカウントでログインされました。招待先のアカウントを選択してください。';
+      } else if (authError === 'expired' || authError === 'used' || authError === 'revoked') {
+        this.authErrorBanner =
+          'この招待リンクは期限切れ・使用済み、または取り消し済みです。管理者へ再発行を依頼してください。';
+      } else if (authError === 'oauth_cancelled') {
+        this.authErrorBanner = 'Google ログインがキャンセルされました。もう一度お試しください。';
       } else if (authError) {
         this.authErrorBanner =
           'ログイン処理が完了できませんでした。時間をおいてもう一度お試しください。';
@@ -1293,7 +1301,11 @@ export class AppComponent implements OnInit {
   }
 
   get isOwnerAdmin(): boolean {
-    return this.account.service_role === 'admin';
+    return this.account.authenticated && this.account.service_role === 'admin';
+  }
+
+  get requiresProductionLogin(): boolean {
+    return !this.api.isOffline && this.account.auth_mode === 'production' && !this.account.authenticated;
   }
 
   get invitations(): InvitationSummary[] {
@@ -1475,8 +1487,8 @@ export class AppComponent implements OnInit {
     this.authBusy = true;
     try {
       await this.api.logout(allDevices);
-      const nextSession = await this.api.getSession();
-      this.account = nextSession;
+      this.dismissCreatedInviteUrl();
+      await this.loadInitialData();
       this.showToast(
         allDevices ? 'すべての端末からログアウトしました' : 'この端末からログアウトしました',
         'info'

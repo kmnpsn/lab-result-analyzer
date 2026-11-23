@@ -450,12 +450,12 @@ export async function resolveCurrentSessionContext(
     const user: InternalUserRecord = {
       id: userId,
       public_id: String(userRow.public_id || `u_${userId}`),
-      email: userRow.email ? String(userRow.email) : 'owner@example.com',
-      display_name: String(userRow.display_name || fallbackProfile?.name || 'サンプル患者'),
+      email: userRow.email ? String(userRow.email) : null,
+      display_name: String(userRow.display_name || fallbackProfile?.name || '利用者'),
       role: userRow.role === 'member' ? 'member' : 'owner',
       service_role: serviceRole,
       plan_tier: planTier,
-      monthly_ocr_used: Number(userRow.monthly_ocr_used ?? 1),
+      monthly_ocr_used: Number(userRow.monthly_ocr_used ?? 0),
       monthly_ocr_limit: Number(userRow.monthly_ocr_limit ?? 10),
       terms_accepted: Boolean(userRow.terms_accepted_at ?? true),
       created_at: String(userRow.created_at || nowIso),
@@ -530,7 +530,7 @@ export async function resolveCurrentSessionContext(
     if (session) {
       user = authMemory.users.find((u) => u.id === session!.user_id) || null;
     }
-  } else if (authMemory.activeUserId !== null) {
+  } else if (authMode === 'demo' && authMemory.activeUserId !== null) {
     user = authMemory.users.find((u) => u.id === authMemory.activeUserId) || null;
     if (user) {
       session =
@@ -617,8 +617,8 @@ async function createSessionForUser(
       .run();
   } else {
     authMemory.sessions.push(session);
+    authMemory.activeUserId = userId;
   }
-  authMemory.activeUserId = userId;
 
   return {
     rawToken,
@@ -671,16 +671,15 @@ async function authenticateGoogleIdentity(params: {
       return { ok: true, userId, serviceRole, cookieHeader, isNewUser: false };
     }
 
-    // Check if non-seed admin exists
+    // Check if non-seed admin exists (DB のみを正本とし、アカウント削除後の再登録にも対応する)
     const adminCountRow = await db
       .prepare(
         `SELECT COUNT(*) as cnt FROM users WHERE service_role = 'admin' AND (public_id IS NULL OR public_id != 'u_owner_default')`
       )
       .first<{ cnt: number }>();
-    const hasRealAdmin = Number(adminCountRow?.cnt ?? 0) > 0 || authMemory.bootstrapAdminClaimed;
+    const hasRealAdmin = Number(adminCountRow?.cnt ?? 0) > 0;
 
     if (!hasRealAdmin && bootstrapOwnerEmail && emailNormalized === bootstrapOwnerEmail) {
-      authMemory.bootstrapAdminClaimed = true;
       const publicId = `u_${randomBytesHex(8)}`;
       const insertUser = await db
         .prepare(
@@ -924,7 +923,7 @@ async function authenticateGoogleIdentity(params: {
 /**
  * Origin / CSRF 検証（ヘッダーが指定されている場合に厳密検証）
  */
-function verifyMutationSecurityHeaders(
+export function verifyMutationSecurityHeaders(
   request: Request,
   expectedCsrfToken: string | undefined,
   requestId: string,
@@ -1024,6 +1023,7 @@ export async function handleAuthAndInviteRoutes(params: {
       authUrl.searchParams.set('redirect_uri', env.GOOGLE_REDIRECT_URI);
       authUrl.searchParams.set('response_type', 'code');
       authUrl.searchParams.set('scope', 'openid email profile');
+      authUrl.searchParams.set('prompt', 'select_account');
       authUrl.searchParams.set('state', state);
       authUrl.searchParams.set('nonce', nonce);
       authUrl.searchParams.set('code_challenge', codeChallenge);
@@ -1144,11 +1144,55 @@ export async function handleAuthAndInviteRoutes(params: {
     const cookies = parseCookies(request);
     const oauthCookie = cookies[OAUTH_COOKIE_NAME];
     const stateParam = url.searchParams.get('state')?.trim() || '';
+    const codeParam = url.searchParams.get('code')?.trim() || '';
+    const oauthErrorParam = url.searchParams.get('error')?.trim() || '';
     let inviteToken = url.searchParams.get('invite')?.trim() || null;
 
+    const wantsHtmlRedirect =
+      (request.headers.get('accept') || '').includes('text/html') &&
+      url.searchParams.get('format') !== 'json';
+
+    const hasMockQuery =
+      url.searchParams.has('mock_email') || url.searchParams.has('mock_sub');
+    const isRealGoogleOAuth = Boolean(
+      env.GOOGLE_CLIENT_ID &&
+        env.GOOGLE_CLIENT_SECRET &&
+        env.GOOGLE_REDIRECT_URI &&
+        env.AUTH_MODE !== 'demo' &&
+        !hasMockQuery
+    );
+
+    const buildCallbackErrorRedirect = (reason: string): Response => {
+      const errRes = new Response(null, {
+        status: 302,
+        headers: {
+          Location: `/?auth_error=${encodeURIComponent(reason)}`,
+          'Set-Cookie': buildOAuthCookieHeader('', 0),
+        },
+      });
+      return finalizeResponse(errRes, requestId, { ...AUTH_NO_STORE_HEADERS });
+    };
+
+    if (oauthErrorParam) {
+      if (wantsHtmlRedirect) {
+        return buildCallbackErrorRedirect('oauth_cancelled');
+      }
+      return createErrorResponse('REQUEST_INVALID', requestId, {
+        route: path,
+        headers: {
+          ...AUTH_NO_STORE_HEADERS,
+          'Set-Cookie': buildOAuthCookieHeader('', 0),
+        },
+      });
+    }
+
+    let verifiedTx: OAuthTransactionPayload | null = null;
     if (oauthCookie) {
-      const tx = await verifyOAuthTransaction(oauthCookie, env);
-      if (!tx || (stateParam && !constantTimeEqual(stateParam, tx.state))) {
+      verifiedTx = await verifyOAuthTransaction(oauthCookie, env);
+      if (!verifiedTx || (stateParam && !constantTimeEqual(stateParam, verifiedTx.state))) {
+        if (wantsHtmlRedirect && isRealGoogleOAuth) {
+          return buildCallbackErrorRedirect('oauth_state_invalid');
+        }
         return createErrorResponse('REQUEST_INVALID', requestId, {
           route: path,
           headers: {
@@ -1157,46 +1201,187 @@ export async function handleAuthAndInviteRoutes(params: {
           },
         });
       }
-      if (!inviteToken && tx.invite) {
-        inviteToken = tx.invite;
+      if (!inviteToken && verifiedTx.invite) {
+        inviteToken = verifiedTx.invite;
       }
     }
 
-    const mockEmail =
-      url.searchParams.get('mock_email')?.trim() ||
-      env.BOOTSTRAP_OWNER_EMAIL?.trim() ||
-      'owner@example.com';
-    const emailNormalized = normalizeEmail(mockEmail);
-    const defaultSub =
-      emailNormalized === 'owner@example.com' && !env.BOOTSTRAP_OWNER_EMAIL
-        ? 'demo-google-sub-001'
-        : `google-sub-${emailNormalized}`;
-    const mockSub = url.searchParams.get('mock_sub')?.trim() || defaultSub;
-    const mockName =
-      url.searchParams.get('mock_name')?.trim() || emailNormalized.split('@')[0];
+    let emailNormalized = '';
+    let resolvedSub = '';
+    let resolvedName = '';
+
+    if (isRealGoogleOAuth) {
+      if (!verifiedTx || !codeParam || !stateParam || !constantTimeEqual(stateParam, verifiedTx.state)) {
+        return wantsHtmlRedirect
+          ? buildCallbackErrorRedirect('oauth_state_invalid')
+          : createErrorResponse('REQUEST_INVALID', requestId, {
+              route: path,
+              headers: {
+                ...AUTH_NO_STORE_HEADERS,
+                'Set-Cookie': buildOAuthCookieHeader('', 0),
+              },
+            });
+      }
+
+      // Google OAuth2 Token Endpoint へ PKCE 付きで認可コード交換
+      const tokenParams = new URLSearchParams({
+        code: codeParam,
+        client_id: env.GOOGLE_CLIENT_ID!,
+        client_secret: env.GOOGLE_CLIENT_SECRET!,
+        redirect_uri: env.GOOGLE_REDIRECT_URI!,
+        grant_type: 'authorization_code',
+        code_verifier: verifiedTx.codeVerifier,
+      });
+
+      let tokenData: { id_token?: string; access_token?: string } | null = null;
+      try {
+        const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: tokenParams.toString(),
+        });
+        if (!tokenRes.ok) {
+          return wantsHtmlRedirect
+            ? buildCallbackErrorRedirect('oauth_failed')
+            : createErrorResponse('INTERNAL', requestId, {
+                route: path,
+                headers: {
+                  ...AUTH_NO_STORE_HEADERS,
+                  'Set-Cookie': buildOAuthCookieHeader('', 0),
+                },
+              });
+        }
+        tokenData = (await tokenRes.json()) as { id_token?: string; access_token?: string };
+      } catch {
+        return wantsHtmlRedirect
+          ? buildCallbackErrorRedirect('oauth_failed')
+          : createErrorResponse('INTERNAL', requestId, {
+              route: path,
+              headers: {
+                ...AUTH_NO_STORE_HEADERS,
+                'Set-Cookie': buildOAuthCookieHeader('', 0),
+              },
+            });
+      }
+
+      // ID トークン payload 検証 (iss, aud, nonce, email_verified, sub, email)
+      const idToken = tokenData?.id_token || '';
+      const idTokenParts = idToken.split('.');
+      if (idTokenParts.length !== 3) {
+        return wantsHtmlRedirect
+          ? buildCallbackErrorRedirect('oauth_failed')
+          : createErrorResponse('REQUEST_INVALID', requestId, {
+              route: path,
+              headers: {
+                ...AUTH_NO_STORE_HEADERS,
+                'Set-Cookie': buildOAuthCookieHeader('', 0),
+              },
+            });
+      }
+
+      let idClaims: {
+        iss?: string;
+        aud?: string;
+        sub?: string;
+        email?: string;
+        email_verified?: boolean | string;
+        name?: string;
+        nonce?: string;
+        exp?: number;
+      };
+      try {
+        idClaims = JSON.parse(base64UrlDecodeToString(idTokenParts[1]));
+      } catch {
+        return wantsHtmlRedirect
+          ? buildCallbackErrorRedirect('oauth_failed')
+          : createErrorResponse('REQUEST_INVALID', requestId, {
+              route: path,
+              headers: {
+                ...AUTH_NO_STORE_HEADERS,
+                'Set-Cookie': buildOAuthCookieHeader('', 0),
+              },
+            });
+      }
+
+      const validIssuer =
+        idClaims.iss === 'https://accounts.google.com' || idClaims.iss === 'accounts.google.com';
+      const validAudience = idClaims.aud === env.GOOGLE_CLIENT_ID;
+      const validNonce =
+        typeof idClaims.nonce === 'string' && constantTimeEqual(idClaims.nonce, verifiedTx.nonce);
+      const validExp =
+        typeof idClaims.exp === 'number' && idClaims.exp * 1000 > Date.now() - 60_000;
+      const emailVerified = idClaims.email_verified === true || idClaims.email_verified === 'true';
+
+      if (!validIssuer || !validAudience || !validNonce || !validExp || !emailVerified || !idClaims.sub || !idClaims.email) {
+        return wantsHtmlRedirect
+          ? buildCallbackErrorRedirect('oauth_failed')
+          : createErrorResponse('REQUEST_INVALID', requestId, {
+              route: path,
+              headers: {
+                ...AUTH_NO_STORE_HEADERS,
+                'Set-Cookie': buildOAuthCookieHeader('', 0),
+              },
+            });
+      }
+
+      // access_token がある場合は OIDC UserInfo でも sub/email を照合
+      if (tokenData?.access_token) {
+        try {
+          const uiRes = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+            headers: { Authorization: `Bearer ${tokenData.access_token}` },
+          });
+          if (uiRes.ok) {
+            const ui = (await uiRes.json()) as { sub?: string; email?: string; name?: string };
+            if (ui.sub && ui.sub !== idClaims.sub) {
+              return wantsHtmlRedirect
+                ? buildCallbackErrorRedirect('oauth_failed')
+                : createErrorResponse('REQUEST_INVALID', requestId, {
+                    route: path,
+                    headers: {
+                      ...AUTH_NO_STORE_HEADERS,
+                      'Set-Cookie': buildOAuthCookieHeader('', 0),
+                    },
+                  });
+            }
+            if (!idClaims.name && ui.name) {
+              idClaims.name = ui.name;
+            }
+          }
+        } catch {
+          // token endpoint 直接応答で検証済みのため userinfo 通信断のみ許容
+        }
+      }
+
+      emailNormalized = normalizeEmail(idClaims.email);
+      resolvedSub = String(idClaims.sub).trim();
+      resolvedName = (idClaims.name || emailNormalized.split('@')[0] || '利用者').trim();
+    } else {
+      // Demo / テスト用シミュレーション
+      const mockEmail =
+        url.searchParams.get('mock_email')?.trim() ||
+        env.BOOTSTRAP_OWNER_EMAIL?.trim() ||
+        'owner@example.com';
+      emailNormalized = normalizeEmail(mockEmail);
+      const defaultSub =
+        emailNormalized === 'owner@example.com' && !env.BOOTSTRAP_OWNER_EMAIL
+          ? 'demo-google-sub-001'
+          : `google-sub-${emailNormalized}`;
+      resolvedSub = url.searchParams.get('mock_sub')?.trim() || defaultSub;
+      resolvedName =
+        url.searchParams.get('mock_name')?.trim() || emailNormalized.split('@')[0];
+    }
 
     const authResult = await authenticateGoogleIdentity({
       email: emailNormalized,
-      sub: mockSub,
-      displayName: mockName,
+      sub: resolvedSub,
+      displayName: resolvedName,
       inviteToken,
       env,
     });
 
-    const wantsHtmlRedirect =
-      (request.headers.get('accept') || '').includes('text/html') &&
-      url.searchParams.get('format') !== 'json';
-
     if (!authResult.ok) {
       if (wantsHtmlRedirect) {
-        const errRedirect = new Response(null, {
-          status: 302,
-          headers: {
-            Location: `/?auth_error=${authResult.reason || 'not_invited'}`,
-            'Set-Cookie': buildOAuthCookieHeader('', 0),
-          },
-        });
-        return finalizeResponse(errRedirect, requestId, { ...AUTH_NO_STORE_HEADERS });
+        return buildCallbackErrorRedirect(authResult.reason || 'not_invited');
       }
       return authJsonResponse(
         {
@@ -1210,18 +1395,20 @@ export async function handleAuthAndInviteRoutes(params: {
         },
         requestId,
         403,
-        { Location: `/?auth_error=${authResult.reason || 'not_invited'}` }
+        {
+          Location: `/?auth_error=${authResult.reason || 'not_invited'}`,
+          'Set-Cookie': buildOAuthCookieHeader('', 0),
+        }
       );
     }
 
     if (wantsHtmlRedirect) {
-      const okRedirect = new Response(null, {
-        status: 302,
-        headers: {
-          Location: '/',
-          ...(authResult.cookieHeader ? { 'Set-Cookie': authResult.cookieHeader } : {}),
-        },
-      });
+      const headers = new Headers({ Location: '/' });
+      headers.append('Set-Cookie', buildOAuthCookieHeader('', 0));
+      if (authResult.cookieHeader) {
+        headers.append('Set-Cookie', authResult.cookieHeader);
+      }
+      const okRedirect = new Response(null, { status: 302, headers });
       return finalizeResponse(okRedirect, requestId, { ...AUTH_NO_STORE_HEADERS });
     }
 
@@ -1740,6 +1927,16 @@ export async function handleAuthAndInviteRoutes(params: {
     }
 
     const ctx = await resolveCurrentSessionContext(request, env, fallbackProfile);
+    if (ctx.authenticated) {
+      const secErr = verifyMutationSecurityHeaders(
+        request,
+        ctx.account.csrf_token,
+        requestId,
+        path
+      );
+      if (secErr) return secErr;
+    }
+
     const nowIso = new Date().toISOString();
     const isAll = path === '/api/auth/logout-all';
 
@@ -1763,9 +1960,8 @@ export async function handleAuthAndInviteRoutes(params: {
       } else if (ctx.session) {
         ctx.session.revoked_at = nowIso;
       }
+      authMemory.activeUserId = null;
     }
-
-    authMemory.activeUserId = null;
 
     return authJsonResponse(
       {
@@ -1797,11 +1993,24 @@ export async function handleAuthAndInviteRoutes(params: {
       });
     }
 
+    const secErr = verifyMutationSecurityHeaders(
+      request,
+      ctx.account.csrf_token,
+      requestId,
+      path
+    );
+    if (secErr) return secErr;
+
     const targetUserId = ctx.user.id;
-    const isDemoUser = targetUserId === 1;
+    const isDemoUser =
+      resolveAuthMode(env) === 'demo' &&
+      targetUserId === 1 &&
+      ctx.user.public_id === 'u_owner_default';
 
     if (isDemoUser) {
-      resetAuthMemoryStore();
+      if (!env.DB) {
+        resetAuthMemoryStore();
+      }
       if (onResetAccountRecords) {
         await onResetAccountRecords(1, true);
       }
@@ -1815,14 +2024,43 @@ export async function handleAuthAndInviteRoutes(params: {
     }
 
     if (env.DB) {
-      await env.DB.prepare(`DELETE FROM auth_sessions WHERE user_id = ?`).bind(targetUserId).run();
-      await env.DB.prepare(`DELETE FROM auth_identities WHERE user_id = ?`).bind(targetUserId).run();
+      // 所有者境界 (user_id) 単位で関連データ・セッション・認証情報・ユーザーを完全削除
+      await env.DB.prepare(
+        `DELETE FROM lab_items WHERE record_id IN (SELECT id FROM lab_records WHERE user_id = ?)`
+      )
+        .bind(targetUserId)
+        .run();
+      await env.DB.prepare(`DELETE FROM lab_records WHERE user_id = ?`)
+        .bind(targetUserId)
+        .run();
+      try {
+        await env.DB.prepare(`DELETE FROM user_profiles WHERE user_id = ?`)
+          .bind(targetUserId)
+          .run();
+      } catch {
+        // 旧スキーマ環境では無視
+      }
+      await env.DB.prepare(`DELETE FROM invitations WHERE created_by = ?`)
+        .bind(targetUserId)
+        .run();
+      await env.DB.prepare(`DELETE FROM auth_sessions WHERE user_id = ?`)
+        .bind(targetUserId)
+        .run();
+      await env.DB.prepare(`DELETE FROM auth_identities WHERE user_id = ?`)
+        .bind(targetUserId)
+        .run();
       await env.DB.prepare(`DELETE FROM users WHERE id = ?`).bind(targetUserId).run();
     } else {
       authMemory.sessions = authMemory.sessions.filter((s) => s.user_id !== targetUserId);
       authMemory.identities = authMemory.identities.filter((i) => i.user_id !== targetUserId);
       authMemory.users = authMemory.users.filter((u) => u.id !== targetUserId);
-      authMemory.activeUserId = null;
+      if (authMemory.activeUserId === targetUserId) {
+        authMemory.activeUserId = null;
+      }
+      // 実管理者が 0 人になったら再ブートストラップ可能に戻す
+      if (!authMemory.users.some((u) => u.service_role === 'admin' && !u.is_demo_seed)) {
+        authMemory.bootstrapAdminClaimed = false;
+      }
     }
 
     if (onResetAccountRecords) {

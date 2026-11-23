@@ -970,4 +970,177 @@ describe('本番ログイン・初回Owner・招待制・SNS後追い連携 (wor
     assert.equal(logoutAllData.logged_out, true);
     assert.equal(logoutAllData.scope, 'all');
   });
+
+  it('本番モード (AUTH_MODE=production) では未ログイン時にデモデータへ繋がらず、新規アカウントはデモデータと完全に分離され削除も正常動作する', async () => {
+    const prodEnv = {
+      AUTH_MODE: 'production',
+      REGISTRATION_MODE: 'invite_only' as const,
+      BOOTSTRAP_OWNER_EMAIL: 'real-owner@example.com',
+      SESSION_SECRET: 'test-prod-session-secret',
+      OAUTH_TRANSACTION_SECRET: 'test-prod-oauth-secret',
+    };
+
+    // 1. 未ログインで /api/bootstrap を呼んでもデモアカウント・デモデータ (7件) は一切返らない
+    const unauthBootRes = await worker.fetch(new Request('http://localhost/api/bootstrap'), prodEnv);
+    assert.equal(unauthBootRes.status, 200);
+    const unauthBoot = (await unauthBootRes.json()) as {
+      account: AccountSummary;
+      records: LabRecord[];
+      profile: { name: string; chronic_conditions: string };
+    };
+    assert.equal(unauthBoot.account.authenticated, false);
+    assert.equal(unauthBoot.records.length, 0);
+    assert.notEqual(unauthBoot.profile.name, 'サンプル患者');
+
+    // 未ログインでのデータ作成・削除は 401 AUTH_SESSION_REQUIRED
+    const unauthPost = await worker.fetch(
+      new Request('http://localhost/api/records', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tested_at: '2026-11-24', overall_score: 7, items: [] }),
+      }),
+      prodEnv
+    );
+    assert.equal(unauthPost.status, 401);
+
+    // 2. 初回 Owner ログイン後はデモデータ 0 件・クリーンプロフィールで開始する
+    const ownerLoginRes = await worker.fetch(
+      new Request(
+        'http://localhost/api/auth/google/start?mock_email=real-owner@example.com&mock_sub=sub-real-owner&mock_name=OwnerTarou'
+      ),
+      prodEnv
+    );
+    assert.equal(ownerLoginRes.status, 200);
+    const ownerCookie = (ownerLoginRes.headers.get('set-cookie') || '').split(';')[0];
+    assert.ok(ownerCookie.startsWith('__Host-karada_session='));
+
+    const ownerBootRes = await worker.fetch(
+      new Request('http://localhost/api/bootstrap', { headers: { Cookie: ownerCookie } }),
+      prodEnv
+    );
+    const ownerBoot = (await ownerBootRes.json()) as {
+      account: AccountSummary;
+      records: LabRecord[];
+      profile: { name: string; chronic_conditions: string };
+    };
+    assert.equal(ownerBoot.account.authenticated, true);
+    assert.equal(ownerBoot.account.email, 'real-owner@example.com');
+    assert.equal(ownerBoot.records.length, 0);
+    assert.equal(ownerBoot.profile.chronic_conditions, '');
+
+    // Owner が体調日記を1件作成 → 削除すると 0 件に戻りデモデータは復活しない
+    const ownerCreateRes = await worker.fetch(
+      new Request('http://localhost/api/records', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: ownerCookie,
+          'X-Karada-CSRF': ownerBoot.account.csrf_token || '',
+        },
+        body: JSON.stringify({ tested_at: '2026-11-24', overall_score: 8, items: [] }),
+      }),
+      prodEnv
+    );
+    assert.equal(ownerCreateRes.status, 201);
+    const createdOwnerRec = (await ownerCreateRes.json()) as LabRecord;
+
+    // 3. 招待リンクで新規アカウントを作成 → Owner の記録もデモデータも一切見えない
+    const invRes = await worker.fetch(
+      new Request('http://localhost/api/auth/invitations', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: ownerCookie,
+          'X-Karada-CSRF': ownerBoot.account.csrf_token || '',
+        },
+        body: JSON.stringify({ email: 'invited-member@example.com' }),
+      }),
+      prodEnv
+    );
+    const invData = (await invRes.json()) as { invite_url: string };
+    const inviteToken = invData.invite_url.split('/invite/')[1];
+
+    const memberLoginRes = await worker.fetch(
+      new Request(
+        `http://localhost/api/auth/google/start?invite=${inviteToken}&mock_email=invited-member@example.com&mock_sub=sub-member-1&mock_name=MemberHanako`
+      ),
+      prodEnv
+    );
+    assert.equal(memberLoginRes.status, 200);
+    const memberCookie = (memberLoginRes.headers.get('set-cookie') || '').split(';')[0];
+
+    const memberBootRes = await worker.fetch(
+      new Request('http://localhost/api/bootstrap', { headers: { Cookie: memberCookie } }),
+      prodEnv
+    );
+    const memberBoot = (await memberBootRes.json()) as {
+      account: AccountSummary;
+      records: LabRecord[];
+    };
+    assert.equal(memberBoot.account.email, 'invited-member@example.com');
+    assert.equal(memberBoot.records.length, 0);
+
+    // Member が Owner のレコードを削除しようとしても消えない
+    await worker.fetch(
+      new Request(`http://localhost/api/records/${createdOwnerRec.id}`, {
+        method: 'DELETE',
+        headers: {
+          Cookie: memberCookie,
+          'X-Karada-CSRF': memberBoot.account.csrf_token || '',
+        },
+      }),
+      prodEnv
+    );
+    const ownerCheckRes = await worker.fetch(
+      new Request('http://localhost/api/bootstrap', { headers: { Cookie: ownerCookie } }),
+      prodEnv
+    );
+    const ownerCheck = (await ownerCheckRes.json()) as { records: LabRecord[] };
+    assert.equal(ownerCheck.records.length, 1);
+
+    // Owner 自身がレコード削除 → 0 件になりデモデータは復活しない
+    const ownerDelRes = await worker.fetch(
+      new Request(`http://localhost/api/records/${createdOwnerRec.id}`, {
+        method: 'DELETE',
+        headers: {
+          Cookie: ownerCookie,
+          'X-Karada-CSRF': ownerBoot.account.csrf_token || '',
+        },
+      }),
+      prodEnv
+    );
+    assert.equal(ownerDelRes.status, 200);
+    const ownerAfterDel = (await (
+      await worker.fetch(
+        new Request('http://localhost/api/bootstrap', { headers: { Cookie: ownerCookie } }),
+        prodEnv
+      )
+    ).json()) as { records: LabRecord[] };
+    assert.equal(ownerAfterDel.records.length, 0);
+
+    // 4. Member が DELETE /api/auth/account を実行 → 未認証になりデモアカウントに戻らない
+    const delAccRes = await worker.fetch(
+      new Request('http://localhost/api/auth/account', {
+        method: 'DELETE',
+        headers: {
+          Cookie: memberCookie,
+          'X-Karada-CSRF': memberBoot.account.csrf_token || '',
+        },
+      }),
+      prodEnv
+    );
+    assert.equal(delAccRes.status, 200);
+    const delAccData = (await delAccRes.json()) as { deleted: boolean; reset_demo: boolean };
+    assert.equal(delAccData.deleted, true);
+    assert.equal(delAccData.reset_demo, false);
+
+    const memberAfterDel = (await (
+      await worker.fetch(
+        new Request('http://localhost/api/bootstrap', { headers: { Cookie: memberCookie } }),
+        prodEnv
+      )
+    ).json()) as { account: AccountSummary; records: LabRecord[] };
+    assert.equal(memberAfterDel.account.authenticated, false);
+    assert.equal(memberAfterDel.records.length, 0);
+  });
 });

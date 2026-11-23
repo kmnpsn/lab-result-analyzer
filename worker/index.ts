@@ -32,7 +32,9 @@ import {
 import {
   handleAuthAndInviteRoutes,
   resetAuthMemoryStore,
+  resolveAuthMode,
   resolveCurrentSessionContext,
+  verifyMutationSecurityHeaders,
   type AuthEnv,
 } from './auth.ts';
 
@@ -82,6 +84,22 @@ export function createDefaultProfile(): UserProfile {
     preferred_provider: 'gemini',
     preferred_model: 'gemini-2.5-flash',
     updated_at: '2026-11-10T09:00:00Z',
+  };
+}
+
+export function createBlankProfileForUser(displayName = '利用者', userId = 0): UserProfile {
+  return {
+    id: userId || 1,
+    name: displayName || '利用者',
+    birth_year: null,
+    age: 35,
+    sex: 'male',
+    height_cm: 170.0,
+    chronic_conditions: '',
+    medications: '',
+    preferred_provider: 'gemini',
+    preferred_model: 'gemini-2.5-flash',
+    updated_at: new Date().toISOString(),
   };
 }
 
@@ -370,10 +388,13 @@ export function createSeedRecords(profile: UserProfile): LabRecord[] {
   return built.sort((a, b) => b.tested_at.localeCompare(a.tested_at));
 }
 
+type StoredLabRecord = LabRecord & { user_id?: number };
+
 interface MemoryStoreState {
   profile: UserProfile;
+  profilesByUserId: Map<number, UserProfile>;
   account: AccountSummary;
-  records: LabRecord[];
+  records: StoredLabRecord[];
   nextRecordId: number;
   nextItemId: number;
 }
@@ -381,14 +402,17 @@ interface MemoryStoreState {
 function createInitialMemoryState(): MemoryStoreState {
   const profile = createDefaultProfile();
   const account = createDefaultAccount(profile);
-  const records = createSeedRecords(profile);
+  const records: StoredLabRecord[] = createSeedRecords(profile).map((r) => ({ ...r, user_id: 1 }));
   const maxRecordId = records.reduce((max, r) => Math.max(max, r.id || 0), 0);
   const maxItemId = records.reduce(
     (max, r) => Math.max(max, ...r.items.map((i) => i.id || 0)),
     0
   );
+  const profilesByUserId = new Map<number, UserProfile>();
+  profilesByUserId.set(1, { ...profile });
   return {
     profile,
+    profilesByUserId,
     account,
     records,
     nextRecordId: maxRecordId + 1,
@@ -482,6 +506,31 @@ export async function ensureD1Schema(db: D1DatabaseLike): Promise<void> {
   } catch {
     // 既に存在する場合は無視
   }
+  try {
+    await db
+      .prepare(`ALTER TABLE lab_records ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1`)
+      .run();
+  } catch {
+    // 既に存在する場合は無視
+  }
+
+  await db
+    .prepare(
+      `CREATE TABLE IF NOT EXISTS user_profiles (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL DEFAULT '利用者',
+        birth_year INTEGER,
+        age INTEGER DEFAULT 35,
+        sex TEXT NOT NULL DEFAULT 'male',
+        height_cm REAL DEFAULT 170.0,
+        chronic_conditions TEXT NOT NULL DEFAULT '',
+        medications TEXT NOT NULL DEFAULT '',
+        preferred_provider TEXT NOT NULL DEFAULT 'gemini',
+        preferred_model TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`
+    )
+    .run();
 
   await db
     .prepare(
@@ -609,101 +658,169 @@ export async function ensureD1Schema(db: D1DatabaseLike): Promise<void> {
   }
 }
 
-async function ensureD1Seeded(db: D1DatabaseLike): Promise<void> {
+async function ensureD1Ready(db: D1DatabaseLike, env: WorkerEnv): Promise<void> {
   await ensureD1Schema(db);
 
-  const defaultProfile = createDefaultProfile();
-  await db
-    .prepare(
-      `INSERT OR IGNORE INTO user_profile
-       (id, name, birth_year, age, sex, height_cm, chronic_conditions, medications, preferred_provider, preferred_model, updated_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .bind(
-      defaultProfile.name,
-      defaultProfile.birth_year ?? null,
-      defaultProfile.age,
-      defaultProfile.sex,
-      defaultProfile.height_cm,
-      defaultProfile.chronic_conditions,
-      defaultProfile.medications,
-      defaultProfile.preferred_provider,
-      defaultProfile.preferred_model,
-      defaultProfile.updated_at || new Date().toISOString()
-    )
-    .run();
+  // 本番モード (AUTH_MODE=production) ではデモユーザーやサンプルデータを自動シードしない
+  if (resolveAuthMode(env) !== 'demo') {
+    return;
+  }
 
-  await db
-    .prepare(
-      `INSERT OR IGNORE INTO users (id, public_id, email, display_name, role, service_role, plan_tier, monthly_ocr_used, monthly_ocr_limit)
-       VALUES (1, 'u_owner_default', 'owner@example.com', ?, 'owner', 'admin', 'free', 1, 10)`
-    )
-    .bind(defaultProfile.name)
-    .run();
+  const existingDemoUser = await db
+    .prepare(`SELECT id FROM users WHERE id = 1`)
+    .first<{ id: number }>();
 
-  await db
-    .prepare(
-      `INSERT OR IGNORE INTO auth_identities (user_id, provider, provider_subject, email_snapshot, display_name_snapshot)
-       VALUES (1, 'google', 'demo-google-sub-001', 'owner@example.com', 'サンプル利用者 (Google)')`
-    )
-    .run();
+  if (!existingDemoUser) {
+    const defaultProfile = createDefaultProfile();
+    await db
+      .prepare(
+        `INSERT OR IGNORE INTO users (id, public_id, email, display_name, role, service_role, plan_tier, monthly_ocr_used, monthly_ocr_limit)
+         VALUES (1, 'u_owner_default', 'owner@example.com', ?, 'owner', 'admin', 'free', 1, 10)`
+      )
+      .bind(defaultProfile.name)
+      .run();
 
-  const countRow = await db.prepare('SELECT COUNT(*) as cnt FROM lab_records').first<{ cnt: number }>();
-  const cnt = Number(countRow?.cnt ?? 0);
-  if (cnt === 0) {
-    const profileRow = await getProfileFromD1(db);
-    const seeds = createSeedRecords(profileRow).slice().reverse(); // Insert chronologically
-    for (const rec of seeds) {
-      await insertRecordIntoD1(db, rec);
+    await db
+      .prepare(
+        `INSERT OR IGNORE INTO user_profiles
+         (user_id, name, birth_year, age, sex, height_cm, chronic_conditions, medications, preferred_provider, preferred_model, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        defaultProfile.name,
+        defaultProfile.birth_year ?? null,
+        defaultProfile.age,
+        defaultProfile.sex,
+        defaultProfile.height_cm,
+        defaultProfile.chronic_conditions,
+        defaultProfile.medications,
+        defaultProfile.preferred_provider,
+        defaultProfile.preferred_model,
+        defaultProfile.updated_at || new Date().toISOString()
+      )
+      .run();
+
+    await db
+      .prepare(
+        `INSERT OR IGNORE INTO auth_identities (user_id, provider, provider_subject, email_snapshot, display_name_snapshot)
+         VALUES (1, 'google', 'demo-google-sub-001', 'owner@example.com', 'サンプル利用者 (Google)')`
+      )
+      .run();
+
+    const countRow = await db
+      .prepare('SELECT COUNT(*) as cnt FROM lab_records WHERE user_id = 1')
+      .first<{ cnt: number }>();
+    if (Number(countRow?.cnt ?? 0) === 0) {
+      const seeds = createSeedRecords(defaultProfile).slice().reverse();
+      for (const rec of seeds) {
+        await insertRecordIntoD1(db, rec, 1);
+      }
     }
   }
 }
 
-async function getProfileFromD1(db: D1DatabaseLike): Promise<UserProfile> {
-  const row = await db.prepare('SELECT * FROM user_profile WHERE id = 1').first<Record<string, unknown>>();
-  if (!row) return createDefaultProfile();
-  return {
-    id: 1,
-    name: String(row.name || 'サンプル患者'),
-    birth_year: row.birth_year !== null && row.birth_year !== undefined ? Number(row.birth_year) : null,
-    age: Number(row.age || 38),
-    sex: (row.sex as BiologicalSex) || 'male',
-    height_cm: Number(row.height_cm || 170),
-    chronic_conditions: String(row.chronic_conditions || ''),
-    medications: String(row.medications || ''),
-    preferred_provider: (row.preferred_provider as AiProviderName) || 'gemini',
-    preferred_model: String(row.preferred_model || 'gemini-2.5-flash'),
-    updated_at: String(row.updated_at || ''),
-  };
-}
-
-async function getAccountFromD1(
+async function getProfileFromD1(
   db: D1DatabaseLike,
-  profile: UserProfile,
-  env?: WorkerEnv
-): Promise<AccountSummary> {
-  const base = createDefaultAccount(profile, env);
-  const row = await db.prepare('SELECT * FROM users WHERE id = 1').first<Record<string, unknown>>();
-  if (!row) return base;
-  const tier = row.plan_tier;
-  const planTier: PlanTier = tier === 'plus' || tier === 'pro' ? tier : 'free';
-  return {
-    ...base,
-    email: row.email ? String(row.email) : null,
-    display_name: String(row.display_name || profile.name || 'サンプル利用者'),
-    plan_tier: planTier,
-    monthly_ocr_used: Number(row.monthly_ocr_used ?? 1),
-    monthly_ocr_limit: Number(row.monthly_ocr_limit ?? 10),
-    terms_accepted: Boolean(row.terms_accepted_at ?? true),
-  };
+  userId: number,
+  fallbackDisplayName = '利用者'
+): Promise<UserProfile> {
+  const row = await db
+    .prepare('SELECT * FROM user_profiles WHERE user_id = ?')
+    .bind(userId)
+    .first<Record<string, unknown>>();
+  if (row) {
+    return {
+      id: userId,
+      name: String(row.name || fallbackDisplayName || '利用者'),
+      birth_year: row.birth_year !== null && row.birth_year !== undefined ? Number(row.birth_year) : null,
+      age: Number(row.age || 35),
+      sex: (row.sex as BiologicalSex) || 'male',
+      height_cm: Number(row.height_cm || 170),
+      chronic_conditions: String(row.chronic_conditions || ''),
+      medications: String(row.medications || ''),
+      preferred_provider: (row.preferred_provider as AiProviderName) || 'gemini',
+      preferred_model: String(row.preferred_model || 'gemini-2.5-flash'),
+      updated_at: String(row.updated_at || ''),
+    };
+  }
+  // デモユーザー (id=1) のみ旧 user_profile テーブルを参照
+  if (userId === 1) {
+    const legacy = await db
+      .prepare('SELECT * FROM user_profile WHERE id = 1')
+      .first<Record<string, unknown>>();
+    if (legacy) {
+      return {
+        id: 1,
+        name: String(legacy.name || 'サンプル患者'),
+        birth_year:
+          legacy.birth_year !== null && legacy.birth_year !== undefined ? Number(legacy.birth_year) : null,
+        age: Number(legacy.age || 38),
+        sex: (legacy.sex as BiologicalSex) || 'male',
+        height_cm: Number(legacy.height_cm || 170),
+        chronic_conditions: String(legacy.chronic_conditions || ''),
+        medications: String(legacy.medications || ''),
+        preferred_provider: (legacy.preferred_provider as AiProviderName) || 'gemini',
+        preferred_model: String(legacy.preferred_model || 'gemini-2.5-flash'),
+        updated_at: String(legacy.updated_at || ''),
+      };
+    }
+    return createDefaultProfile();
+  }
+  // 新規アカウントはデモデータを含まないクリーンなプロフィールから開始
+  return createBlankProfileForUser(fallbackDisplayName, userId);
 }
 
-async function getRecordsFromD1(db: D1DatabaseLike): Promise<LabRecord[]> {
+async function upsertProfileToD1(
+  db: D1DatabaseLike,
+  userId: number,
+  updated: UserProfile
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO user_profiles
+       (user_id, name, birth_year, age, sex, height_cm, chronic_conditions, medications, preferred_provider, preferred_model, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         name = excluded.name,
+         birth_year = excluded.birth_year,
+         age = excluded.age,
+         sex = excluded.sex,
+         height_cm = excluded.height_cm,
+         chronic_conditions = excluded.chronic_conditions,
+         medications = excluded.medications,
+         preferred_provider = excluded.preferred_provider,
+         preferred_model = excluded.preferred_model,
+         updated_at = excluded.updated_at`
+    )
+    .bind(
+      userId,
+      updated.name,
+      updated.birth_year ?? null,
+      updated.age,
+      updated.sex,
+      updated.height_cm,
+      updated.chronic_conditions,
+      updated.medications,
+      updated.preferred_provider,
+      updated.preferred_model,
+      updated.updated_at
+    )
+    .run();
+}
+
+async function getRecordsFromD1(db: D1DatabaseLike, userId: number): Promise<LabRecord[]> {
   const recRes = await db
-    .prepare('SELECT * FROM lab_records ORDER BY tested_at DESC, id DESC')
+    .prepare('SELECT * FROM lab_records WHERE user_id = ? ORDER BY tested_at DESC, id DESC')
+    .bind(userId)
     .all<Record<string, unknown>>();
   const itemRes = await db
-    .prepare('SELECT * FROM lab_items ORDER BY id ASC')
+    .prepare(
+      `SELECT li.* FROM lab_items li
+       INNER JOIN lab_records lr ON li.record_id = lr.id
+       WHERE lr.user_id = ?
+       ORDER BY li.id ASC`
+    )
+    .bind(userId)
     .all<Record<string, unknown>>();
 
   const itemsByRecordId = new Map<number, LabItem[]>();
@@ -756,7 +873,11 @@ async function getRecordsFromD1(db: D1DatabaseLike): Promise<LabRecord[]> {
   });
 }
 
-async function insertRecordIntoD1(db: D1DatabaseLike, record: LabRecord): Promise<LabRecord> {
+async function insertRecordIntoD1(
+  db: D1DatabaseLike,
+  record: LabRecord,
+  userId: number
+): Promise<LabRecord> {
   const recordType: RecordType =
     record.record_type === 'daily' || (record.items || []).length === 0 ? 'daily' : 'lab';
   const symptomTags = record.symptom_tags || '';
@@ -764,10 +885,11 @@ async function insertRecordIntoD1(db: D1DatabaseLike, record: LabRecord): Promis
   const res = await db
     .prepare(
       `INSERT INTO lab_records
-       (record_type, symptom_tags, tested_at, facility_name, weight_kg, overall_score, fatigue_score, sleep_score, pain_score, appetite_score, condition_note, ai_provider, ai_model, ai_summary, ai_correlation, ai_advice, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (user_id, record_type, symptom_tags, tested_at, facility_name, weight_kg, overall_score, fatigue_score, sleep_score, pain_score, appetite_score, condition_note, ai_provider, ai_model, ai_summary, ai_correlation, ai_advice, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
+      userId,
       recordType,
       symptomTags,
       record.tested_at,
@@ -833,28 +955,72 @@ async function getRepositoryData(
   request?: Request
 ): Promise<{
   useD1: boolean;
+  authenticated: boolean;
+  userId: number | null;
   profile: UserProfile;
   account: AccountSummary;
   records: LabRecord[];
 }> {
   if (env.DB) {
-    await ensureD1Seeded(env.DB);
-    const profile = await getProfileFromD1(env.DB);
-    const sessionCtx = await resolveCurrentSessionContext(request, env, profile);
-    const account = sessionCtx.authenticated
-      ? sessionCtx.account
-      : await getAccountFromD1(env.DB, profile, env);
-    const records = await getRecordsFromD1(env.DB);
-    return { useD1: true, profile, account, records };
+    await ensureD1Ready(env.DB, env);
+    const sessionCtx = await resolveCurrentSessionContext(request, env);
+    if (!sessionCtx.authenticated || !sessionCtx.user) {
+      return {
+        useD1: true,
+        authenticated: false,
+        userId: null,
+        profile: createBlankProfileForUser('ゲスト', 0),
+        account: sessionCtx.account,
+        records: [],
+      };
+    }
+    const userId = sessionCtx.user.id;
+    const profile = await getProfileFromD1(env.DB, userId, sessionCtx.user.display_name);
+    const records = await getRecordsFromD1(env.DB, userId);
+    return {
+      useD1: true,
+      authenticated: true,
+      userId,
+      profile,
+      account: sessionCtx.account,
+      records,
+    };
   }
-  const profile = { ...memoryStore.profile };
-  const sessionCtx = await resolveCurrentSessionContext(request, env, profile);
-  const account = sessionCtx.account;
+
+  const sessionCtx = await resolveCurrentSessionContext(request, env, memoryStore.profile);
+  if (!sessionCtx.authenticated || !sessionCtx.user) {
+    return {
+      useD1: false,
+      authenticated: false,
+      userId: null,
+      profile: createBlankProfileForUser('ゲスト', 0),
+      account: sessionCtx.account,
+      records: [],
+    };
+  }
+
+  const userId = sessionCtx.user.id;
+  let profile = memoryStore.profilesByUserId.get(userId);
+  if (!profile) {
+    profile =
+      userId === 1
+        ? { ...memoryStore.profile }
+        : createBlankProfileForUser(sessionCtx.user.display_name, userId);
+    memoryStore.profilesByUserId.set(userId, profile);
+  }
+  const userRecords = memoryStore.records
+    .filter((r) => (r.user_id ?? 1) === userId)
+    .map(({ user_id: _uid, ...rest }) => ({
+      ...rest,
+      items: rest.items.map((i) => ({ ...i })),
+    }));
   return {
     useD1: false,
-    profile,
-    account,
-    records: memoryStore.records.map((r) => ({ ...r, items: r.items.map((i) => ({ ...i })) })),
+    authenticated: true,
+    userId,
+    profile: { ...profile },
+    account: sessionCtx.account,
+    records: userRecords,
   };
 }
 
@@ -984,21 +1150,44 @@ export default {
     try {
       // 0. Auth & Invite API routes (/api/auth/* and /api/invite/*/verify)
       if (path.startsWith('/api/auth/') || path.startsWith('/api/invite/')) {
+        if (env.DB) {
+          await ensureD1Ready(env.DB, env);
+        }
         const authRes = await handleAuthAndInviteRoutes({
           request,
           env,
           requestId,
           fallbackProfile: memoryStore.profile,
-          onResetAccountRecords: async (_userId, isDemoReset) => {
+          onResetAccountRecords: async (targetUserId, isDemoReset) => {
+            if (env.DB) {
+              if (isDemoReset) {
+                await env.DB.prepare(
+                  `DELETE FROM lab_items WHERE record_id IN (SELECT id FROM lab_records WHERE user_id = 1)`
+                ).run();
+                await env.DB.prepare(`DELETE FROM lab_records WHERE user_id = 1`).run();
+                const defaultProfile = createDefaultProfile();
+                await upsertProfileToD1(env.DB, 1, defaultProfile);
+                const seeds = createSeedRecords(defaultProfile).slice().reverse();
+                for (const rec of seeds) {
+                  await insertRecordIntoD1(env.DB, rec, 1);
+                }
+              }
+              return;
+            }
             if (isDemoReset) {
               const initial = createInitialMemoryState();
               memoryStore.profile = initial.profile;
+              memoryStore.profilesByUserId.set(1, { ...initial.profile });
               memoryStore.account = initial.account;
-              memoryStore.records = initial.records;
-              memoryStore.nextRecordId = initial.nextRecordId;
-              memoryStore.nextItemId = initial.nextItemId;
+              memoryStore.records = [
+                ...memoryStore.records.filter((r) => (r.user_id ?? 1) !== 1),
+                ...initial.records,
+              ];
+              memoryStore.nextRecordId = Math.max(memoryStore.nextRecordId, initial.nextRecordId);
+              memoryStore.nextItemId = Math.max(memoryStore.nextItemId, initial.nextItemId);
             } else {
-              memoryStore.records = [];
+              memoryStore.profilesByUserId.delete(targetUserId);
+              memoryStore.records = memoryStore.records.filter((r) => (r.user_id ?? 1) !== targetUserId);
             }
           },
         });
@@ -1034,7 +1223,14 @@ export default {
         if (parsed.errorResponse) return parsed.errorResponse;
         const body = parsed.data!;
 
-        const { useD1, profile: currentProfile } = await getRepositoryData(env);
+        const repo = await getRepositoryData(env, request);
+        if (!repo.authenticated || repo.userId === null) {
+          return createErrorResponse('AUTH_SESSION_REQUIRED', requestId, { route: path });
+        }
+        const secErr = verifyMutationSecurityHeaders(request, repo.account.csrf_token, requestId, path);
+        if (secErr) return secErr;
+
+        const { useD1, userId, profile: currentProfile } = repo;
 
         const validSex: BiologicalSex =
           body.sex === 'female' || body.sex === 'other' || body.sex === 'male'
@@ -1050,6 +1246,7 @@ export default {
 
         const updated: UserProfile = {
           ...currentProfile,
+          id: userId,
           name: body.name !== undefined ? String(body.name).trim() || currentProfile.name : currentProfile.name,
           birth_year:
             body.birth_year !== undefined
@@ -1070,31 +1267,22 @@ export default {
         };
 
         if (useD1 && env.DB) {
-          await env.DB.prepare(
-            `UPDATE user_profile
-             SET name = ?, birth_year = ?, age = ?, sex = ?, height_cm = ?,
-                 chronic_conditions = ?, medications = ?, preferred_provider = ?, preferred_model = ?, updated_at = ?
-             WHERE id = 1`
-          )
-            .bind(
-              updated.name,
-              updated.birth_year ?? null,
-              updated.age,
-              updated.sex,
-              updated.height_cm,
-              updated.chronic_conditions,
-              updated.medications,
-              updated.preferred_provider,
-              updated.preferred_model,
-              updated.updated_at
-            )
+          await upsertProfileToD1(env.DB, userId, updated);
+          await env.DB.prepare(`UPDATE users SET display_name = ? WHERE id = ?`)
+            .bind(updated.name, userId)
             .run();
         } else {
-          const sexChanged = memoryStore.profile.sex !== updated.sex;
-          memoryStore.profile = updated;
-          memoryStore.account.display_name = updated.name;
+          const prevProfile = memoryStore.profilesByUserId.get(userId) || currentProfile;
+          const sexChanged = prevProfile.sex !== updated.sex;
+          memoryStore.profilesByUserId.set(userId, updated);
+          if (userId === 1) {
+            memoryStore.profile = updated;
+            memoryStore.account.display_name = updated.name;
+          }
           if (sexChanged) {
-            memoryStore.records = recalculateRecordsForSex(memoryStore.records, updated.sex);
+            memoryStore.records = memoryStore.records.map((rec) =>
+              (rec.user_id ?? 1) === userId ? recalculateRecordsForSex([rec], updated.sex)[0] : rec
+            );
           }
         }
 
@@ -1122,7 +1310,14 @@ export default {
         const model = (rawBody.model || recordPayload.model || recordPayload.ai_model) as string | undefined;
         const apiKey = (rawBody.apiKey || recordPayload.apiKey) as string | undefined;
 
-        const { useD1, profile, records: existingRecords } = await getRepositoryData(env);
+        const repo = await getRepositoryData(env, request);
+        if (!repo.authenticated || repo.userId === null) {
+          return createErrorResponse('AUTH_SESSION_REQUIRED', requestId, { route: path });
+        }
+        const secErr = verifyMutationSecurityHeaders(request, repo.account.csrf_token, requestId, path);
+        if (secErr) return secErr;
+
+        const { useD1, userId, profile, records: existingRecords } = repo;
 
         const rawItems = Array.isArray(recordPayload.items) ? recordPayload.items : [];
         const normalizedItems: LabItem[] = rawItems
@@ -1202,14 +1397,15 @@ export default {
         }));
 
         if (useD1 && env.DB) {
-          const saved = await insertRecordIntoD1(env.DB, draftRecord);
+          const saved = await insertRecordIntoD1(env.DB, draftRecord, userId);
           return jsonResponse(saved, requestId, 201);
         }
 
         const recordId = memoryStore.nextRecordId++;
-        const savedRecord: LabRecord = {
+        const savedRecord: StoredLabRecord = {
           ...draftRecord,
           id: recordId,
+          user_id: userId,
           items: draftRecord.items.map((it) => ({
             ...it,
             id: memoryStore.nextItemId++,
@@ -1218,7 +1414,8 @@ export default {
         };
         memoryStore.records.push(savedRecord);
         memoryStore.records.sort((a, b) => b.tested_at.localeCompare(a.tested_at) || (b.id || 0) - (a.id || 0));
-        return jsonResponse(savedRecord, requestId, 201);
+        const { user_id: _uid, ...publicSaved } = savedRecord;
+        return jsonResponse(publicSaved, requestId, 201);
       }
 
       // 4. DELETE /api/records/:id
@@ -1228,13 +1425,26 @@ export default {
           return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
         }
         const targetId = Number(deleteMatch[1]);
-        const { useD1 } = await getRepositoryData(env);
+        const repo = await getRepositoryData(env, request);
+        if (!repo.authenticated || repo.userId === null) {
+          return createErrorResponse('AUTH_SESSION_REQUIRED', requestId, { route: path });
+        }
+        const secErr = verifyMutationSecurityHeaders(request, repo.account.csrf_token, requestId, path);
+        if (secErr) return secErr;
 
-        if (useD1 && env.DB) {
-          await env.DB.prepare('DELETE FROM lab_items WHERE record_id = ?').bind(targetId).run();
-          await env.DB.prepare('DELETE FROM lab_records WHERE id = ?').bind(targetId).run();
+        if (repo.useD1 && env.DB) {
+          await env.DB.prepare(
+            `DELETE FROM lab_items WHERE record_id = ? AND record_id IN (SELECT id FROM lab_records WHERE id = ? AND user_id = ?)`
+          )
+            .bind(targetId, targetId, repo.userId)
+            .run();
+          await env.DB.prepare('DELETE FROM lab_records WHERE id = ? AND user_id = ?')
+            .bind(targetId, repo.userId)
+            .run();
         } else {
-          memoryStore.records = memoryStore.records.filter((r) => r.id !== targetId);
+          memoryStore.records = memoryStore.records.filter(
+            (r) => !(r.id === targetId && (r.user_id ?? 1) === repo.userId)
+          );
         }
 
         return jsonResponse({ deleted: true, id: targetId }, requestId);
@@ -1257,7 +1467,11 @@ export default {
         if (parsed.errorResponse) return parsed.errorResponse;
         const body = parsed.data!;
 
-        const { profile } = await getRepositoryData(env);
+        const repo = await getRepositoryData(env, request);
+        if (!repo.authenticated || repo.userId === null) {
+          return createErrorResponse('AUTH_SESSION_REQUIRED', requestId, { route: path });
+        }
+        const { profile } = repo;
         const ocrResult = await extractLabFromOcr({
           imageBase64: body.imageBase64,
           mimeType: body.mimeType,
@@ -1291,7 +1505,10 @@ export default {
           return createErrorResponse('REQUEST_INVALID', requestId, { route: path });
         }
 
-        const repo = await getRepositoryData(env);
+        const repo = await getRepositoryData(env, request);
+        if (!repo.authenticated || repo.userId === null) {
+          return createErrorResponse('AUTH_SESSION_REQUIRED', requestId, { route: path });
+        }
         const targetProfile = body.profile || repo.profile;
         const targetHistory = body.history || repo.records;
 
@@ -1313,13 +1530,13 @@ export default {
           env,
         });
 
-        // Update persisted record if it exists in store
+        // Update persisted record if it exists in store (owner boundary enforced)
         if (normalizedRecord.id) {
           if (repo.useD1 && env.DB) {
             await env.DB.prepare(
               `UPDATE lab_records
                SET ai_provider = ?, ai_model = ?, ai_summary = ?, ai_correlation = ?, ai_advice = ?
-               WHERE id = ?`
+               WHERE id = ? AND user_id = ?`
             )
               .bind(
                 result.provider_used,
@@ -1327,11 +1544,14 @@ export default {
                 result.ai_summary,
                 result.ai_correlation,
                 result.ai_advice,
-                normalizedRecord.id
+                normalizedRecord.id,
+                repo.userId
               )
               .run();
           } else {
-            const idx = memoryStore.records.findIndex((r) => r.id === normalizedRecord.id);
+            const idx = memoryStore.records.findIndex(
+              (r) => r.id === normalizedRecord.id && (r.user_id ?? 1) === repo.userId
+            );
             if (idx !== -1) {
               memoryStore.records[idx] = {
                 ...memoryStore.records[idx],
@@ -1357,8 +1577,11 @@ export default {
         if (request.method !== 'GET') {
           return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
         }
-        const { records } = await getRepositoryData(env);
-        const csvContent = buildRecordsCsv(records);
+        const repo = await getRepositoryData(env, request);
+        if (!repo.authenticated || repo.userId === null) {
+          return createErrorResponse('AUTH_SESSION_REQUIRED', requestId, { route: path });
+        }
+        const csvContent = buildRecordsCsv(repo.records);
         const raw = new Response(csvContent, {
           status: 200,
           headers: {
@@ -1373,13 +1596,16 @@ export default {
         if (request.method !== 'GET') {
           return createErrorResponse('METHOD_NOT_ALLOWED', requestId, { route: path });
         }
-        const { profile, account, records } = await getRepositoryData(env);
+        const repo = await getRepositoryData(env, request);
+        if (!repo.authenticated || repo.userId === null) {
+          return createErrorResponse('AUTH_SESSION_REQUIRED', requestId, { route: path });
+        }
         return jsonResponse(
           {
             exported_at: new Date().toISOString(),
-            profile,
-            account,
-            records,
+            profile: repo.profile,
+            account: repo.account,
+            records: repo.records,
           },
           requestId
         );
