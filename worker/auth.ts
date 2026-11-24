@@ -346,6 +346,17 @@ export function resolveAuthMode(env?: AuthEnv): 'demo' | 'production' {
   return 'demo';
 }
 
+/**
+ * 実際にログイン動線（OAuth/OIDC）が開通しているプロバイダ一覧を返す。
+ * 本番モードでは現時点で Google のみ開通。未開通 SNS へのダミー連携・ロックアウトを防ぐために使う。
+ */
+export function getEnabledLoginProviders(env?: AuthEnv): AuthProviderId[] {
+  if (resolveAuthMode(env) === 'demo') {
+    return AUTH_PROVIDERS.map((p) => p.id);
+  }
+  return ['google'];
+}
+
 async function signOAuthTransaction(
   payload: OAuthTransactionPayload,
   env?: AuthEnv
@@ -436,6 +447,7 @@ export async function resolveCurrentSessionContext(
         monthly_ocr_used: 0,
         monthly_ocr_limit: 10,
         terms_accepted: false,
+        enabled_auth_providers: getEnabledLoginProviders(env),
         linked_identities: [],
         invitations: [],
       };
@@ -510,6 +522,7 @@ export async function resolveCurrentSessionContext(
       monthly_ocr_limit: user.monthly_ocr_limit,
       terms_accepted: user.terms_accepted,
       csrf_token: sessionRow?.csrf_token || authMemory.defaultCsrfToken,
+      enabled_auth_providers: getEnabledLoginProviders(env),
       linked_identities: linkedIdentities,
       invitations,
     };
@@ -551,6 +564,7 @@ export async function resolveCurrentSessionContext(
       monthly_ocr_used: 0,
       monthly_ocr_limit: 10,
       terms_accepted: false,
+      enabled_auth_providers: getEnabledLoginProviders(env),
       linked_identities: [],
       invitations: [],
     };
@@ -582,6 +596,7 @@ export async function resolveCurrentSessionContext(
     monthly_ocr_limit: user.monthly_ocr_limit,
     terms_accepted: user.terms_accepted,
     csrf_token: session?.csrf_token || authMemory.defaultCsrfToken,
+    enabled_auth_providers: getEnabledLoginProviders(env),
     linked_identities: linkedIdentities,
     invitations,
   };
@@ -1742,6 +1757,26 @@ export async function handleAuthAndInviteRoutes(params: {
 
     const provider: AuthProviderId = body.provider;
     const providerLabel = getProviderLabel(provider);
+
+    // 本番モードでは実 OAuth ログインが開通していない SNS へのダミー連携を禁止（ロックアウト防止）
+    if (resolveAuthMode(env) === 'production') {
+      const enabledProviders = getEnabledLoginProviders(env);
+      if (!enabledProviders.includes(provider)) {
+        return createStateConflictResponse(
+          `${providerLabel} ログインは現在準備中のため連携できません。`,
+          requestId,
+          path
+        );
+      }
+      if (typeof body.provider_subject !== 'string' || !body.provider_subject.trim()) {
+        return createStateConflictResponse(
+          `${providerLabel} の外部認証が完了していないため連携できません。`,
+          requestId,
+          path
+        );
+      }
+    }
+
     const providerSubject =
       typeof body.provider_subject === 'string' && body.provider_subject.trim()
         ? body.provider_subject.trim()
@@ -1893,6 +1928,24 @@ export async function handleAuthAndInviteRoutes(params: {
         requestId,
         path
       );
+    }
+
+    // 本番モードでは、解除後に「実際にログイン可能な開通済みプロバイダ」が最低1つ残ることを強制する
+    if (resolveAuthMode(env) === 'production') {
+      const enabledProviders = getEnabledLoginProviders(env);
+      const remainingLoginable = currentIdentities.filter(
+        (i) =>
+          i.provider !== targetProvider &&
+          enabledProviders.includes(i.provider) &&
+          !i.provider_subject.startsWith('demo-')
+      );
+      if (remainingLoginable.length === 0) {
+        return createStateConflictResponse(
+          '実際にログイン可能な手段がなくなるため解除できません。別のログイン方法が開通・連携されてから解除してください。',
+          requestId,
+          path
+        );
+      }
     }
 
     if (env.DB) {

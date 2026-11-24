@@ -1243,4 +1243,53 @@ describe('本番ログイン・初回Owner・招待制・SNS後追い連携 (wor
     assert.equal(delData.deleted, true);
     assert.equal(delData.rules.length, 0);
   });
+
+  it('本番モードでは未開通SNSのダミー連携が 409 で拒否され、唯一のログイン可能手段 (Google) の解除も拒否される', async () => {
+    const prodEnv = {
+      AUTH_MODE: 'production',
+      REGISTRATION_MODE: 'invite_only' as const,
+      BOOTSTRAP_OWNER_EMAIL: 'guard-owner@example.com',
+      SESSION_SECRET: 'test-guard-secret',
+    };
+
+    const loginRes = await worker.fetch(
+      new Request(
+        'http://localhost/api/auth/google/start?mock_email=guard-owner@example.com&mock_sub=sub-guard-owner'
+      ),
+      prodEnv
+    );
+    const cookie = (loginRes.headers.get('set-cookie') || '').split(';')[0];
+    const sess = (await (
+      await worker.fetch(new Request('http://localhost/api/auth/session', { headers: { Cookie: cookie } }), prodEnv)
+    ).json()) as AccountSummary;
+    assert.deepEqual(sess.enabled_auth_providers, ['google']);
+
+    // 未開通 SNS (LINE) へのダミー連携は 409 STATE_CONFLICT で拒否される
+    const lineLinkRes = await worker.fetch(
+      new Request('http://localhost/api/auth/identities/link', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: cookie,
+          'X-Karada-CSRF': sess.csrf_token || '',
+        },
+        body: JSON.stringify({ provider: 'line' }),
+      }),
+      prodEnv
+    );
+    assert.equal(lineLinkRes.status, 409);
+
+    // 唯一のログイン可能手段 (Google) の解除も 409 STATE_CONFLICT で拒否される
+    const unlinkGoogleRes = await worker.fetch(
+      new Request('http://localhost/api/auth/identities/google', {
+        method: 'DELETE',
+        headers: {
+          Cookie: cookie,
+          'X-Karada-CSRF': sess.csrf_token || '',
+        },
+      }),
+      prodEnv
+    );
+    assert.equal(unlinkGoogleRes.status, 409);
+  });
 });

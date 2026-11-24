@@ -1410,6 +1410,7 @@
               <div class="sns-provider-grid">
                 @for (p of authProviders; track p.id) {
                   @let linked = getLinkedIdentity(p.id);
+                  @let enabled = isProviderEnabled(p.id);
                   <div class="sns-provider-card" [class.linked]="!!linked">
                     <div class="sns-provider-head">
                       <span class="sns-icon-badge" [attr.data-provider]="p.id">{{ p.icon }}</span>
@@ -1419,6 +1420,8 @@
                           <span class="sns-linked-label">
                             ✅ 連携済み（{{ linked.email_snapshot || linked.provider_subject }}）
                           </span>
+                        } @else if (!enabled) {
+                          <span class="sns-unlinked-label">準備中（未接続）</span>
                         } @else {
                           <span class="sns-unlinked-label">未連携</span>
                         }
@@ -1430,14 +1433,22 @@
                         <button
                           type="button"
                           class="icon-danger-btn sns-action-btn"
-                          [disabled]="!canUnlinkIdentity || linkingProvider === p.id"
+                          [disabled]="!canUnlinkProvider(p.id) || linkingProvider === p.id"
                           (click)="unlinkProvider(p)"
                         >
                           {{ linkingProvider === p.id ? '処理中...' : '解除' }}
                         </button>
-                        @if (!canUnlinkIdentity) {
+                        @if (!canUnlinkProvider(p.id)) {
                           <span class="sns-lock-hint">※唯一のログイン手段のため解除できません</span>
                         }
+                      } @else if (!enabled) {
+                        <button
+                          type="button"
+                          class="btn-ghost small sns-action-btn"
+                          disabled
+                        >
+                          準備中
+                        </button>
                       } @else {
                         <button
                           type="button"

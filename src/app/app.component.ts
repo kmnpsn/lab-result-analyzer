@@ -1593,6 +1593,27 @@ export class AppComponent implements OnInit {
     return this.linkedIdentities.length > 1;
   }
 
+  isProviderEnabled(providerId: AuthProviderId): boolean {
+    if (this.account.auth_mode !== 'production') {
+      return true;
+    }
+    const enabled = this.account.enabled_auth_providers ?? ['google'];
+    return enabled.includes(providerId);
+  }
+
+  canUnlinkProvider(providerId: AuthProviderId): boolean {
+    if (this.linkedIdentities.length <= 1) return false;
+    if (this.account.auth_mode !== 'production') return true;
+    const enabled = this.account.enabled_auth_providers ?? ['google'];
+    const remainingLoginable = this.linkedIdentities.filter(
+      (i) =>
+        i.provider !== providerId &&
+        enabled.includes(i.provider) &&
+        !(i.provider_subject || '').startsWith('demo-')
+    );
+    return remainingLoginable.length > 0;
+  }
+
   get isOwnerAdmin(): boolean {
     return this.account.authenticated && this.account.service_role === 'admin';
   }

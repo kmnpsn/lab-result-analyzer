@@ -56,6 +56,7 @@ export interface AccountSummary {
   monthly_ocr_limit: number;
   terms_accepted: boolean;
   csrf_token?: string;
+  enabled_auth_providers?: AuthProviderId[];
   linked_identities?: LinkedIdentity[];
   invitations?: InvitationSummary[];
 }
