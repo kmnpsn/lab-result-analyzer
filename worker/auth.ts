@@ -19,6 +19,12 @@ export interface AuthEnv {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
   GOOGLE_REDIRECT_URI?: string;
+  LINE_CHANNEL_ID?: string;
+  LINE_CHANNEL_SECRET?: string;
+  LINE_REDIRECT_URI?: string;
+  AMAZON_CLIENT_ID?: string;
+  AMAZON_CLIENT_SECRET?: string;
+  AMAZON_REDIRECT_URI?: string;
   SESSION_SECRET?: string;
   OAUTH_TRANSACTION_SECRET?: string;
 }
@@ -68,6 +74,9 @@ export interface InternalInvitationRecord {
 }
 
 interface OAuthTransactionPayload {
+  provider: AuthProviderId;
+  mode: 'login' | 'link';
+  linkUserId?: number;
   state: string;
   nonce: string;
   codeVerifier: string;
@@ -348,13 +357,27 @@ export function resolveAuthMode(env?: AuthEnv): 'demo' | 'production' {
 
 /**
  * 実際にログイン動線（OAuth/OIDC）が開通しているプロバイダ一覧を返す。
- * 本番モードでは現時点で Google のみ開通。未開通 SNS へのダミー連携・ロックアウトを防ぐために使う。
+ * 本番モードでは Worker Secrets が登録されているプロバイダ（Google / LINE / Amazon）を自動有効化する。
  */
 export function getEnabledLoginProviders(env?: AuthEnv): AuthProviderId[] {
   if (resolveAuthMode(env) === 'demo') {
     return AUTH_PROVIDERS.map((p) => p.id);
   }
-  return ['google'];
+  const enabled: AuthProviderId[] = [];
+  if (env?.GOOGLE_CLIENT_ID && env?.GOOGLE_CLIENT_SECRET && env?.GOOGLE_REDIRECT_URI) {
+    enabled.push('google');
+  }
+  if (env?.LINE_CHANNEL_ID && env?.LINE_CHANNEL_SECRET && env?.LINE_REDIRECT_URI) {
+    enabled.push('line');
+  }
+  if (env?.AMAZON_CLIENT_ID && env?.AMAZON_CLIENT_SECRET && env?.AMAZON_REDIRECT_URI) {
+    enabled.push('amazon');
+  }
+  // テスト環境等で AUTH_MODE=production のみ指定された場合は google を既定の開通枠とする
+  if (enabled.length === 0) {
+    enabled.push('google');
+  }
+  return enabled;
 }
 
 async function signOAuthTransaction(
@@ -642,7 +665,8 @@ async function createSessionForUser(
   };
 }
 
-async function authenticateGoogleIdentity(params: {
+async function authenticateExternalIdentity(params: {
+  provider: AuthProviderId;
   email: string;
   sub: string;
   displayName?: string;
@@ -656,10 +680,12 @@ async function authenticateGoogleIdentity(params: {
   cookieHeader?: string;
   isNewUser?: boolean;
 }> {
+  const provider = params.provider;
+  const providerLabel = getProviderLabel(provider);
   const emailNormalized = normalizeEmail(params.email);
   const sub = params.sub.trim();
   const displayName =
-    params.displayName?.trim() || emailNormalized.split('@')[0] || '利用者';
+    params.displayName?.trim() || (emailNormalized ? emailNormalized.split('@')[0] : '') || '利用者';
   const nowIso = new Date().toISOString();
   const regMode = resolveRegistrationMode(params.env);
   const bootstrapOwnerEmail = normalizeEmail(params.env.BOOTSTRAP_OWNER_EMAIL);
@@ -667,8 +693,8 @@ async function authenticateGoogleIdentity(params: {
   if (params.env.DB) {
     const db = params.env.DB;
     const existingIdentity = await db
-      .prepare(`SELECT * FROM auth_identities WHERE provider = 'google' AND provider_subject = ?`)
-      .bind(sub)
+      .prepare(`SELECT * FROM auth_identities WHERE provider = ? AND provider_subject = ?`)
+      .bind(provider, sub)
       .first<Record<string, unknown>>();
 
     if (existingIdentity) {
@@ -694,22 +720,22 @@ async function authenticateGoogleIdentity(params: {
       .first<{ cnt: number }>();
     const hasRealAdmin = Number(adminCountRow?.cnt ?? 0) > 0;
 
-    if (!hasRealAdmin && bootstrapOwnerEmail && emailNormalized === bootstrapOwnerEmail) {
+    if (!hasRealAdmin && bootstrapOwnerEmail && emailNormalized && emailNormalized === bootstrapOwnerEmail) {
       const publicId = `u_${randomBytesHex(8)}`;
       const insertUser = await db
         .prepare(
           `INSERT INTO users (public_id, email, display_name, role, service_role, plan_tier, monthly_ocr_used, monthly_ocr_limit, terms_accepted_at, created_at)
            VALUES (?, ?, ?, 'owner', 'admin', 'free', 0, 10, ?, ?)`
         )
-        .bind(publicId, emailNormalized, displayName, nowIso, nowIso)
+        .bind(publicId, emailNormalized || null, displayName, nowIso, nowIso)
         .run();
       const newUserId = Number(insertUser.meta?.last_row_id || 2);
       await db
         .prepare(
           `INSERT INTO auth_identities (user_id, provider, provider_subject, email_snapshot, display_name_snapshot, linked_at, last_used_at)
-           VALUES (?, 'google', ?, ?, ?, ?, ?)`
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
         )
-        .bind(newUserId, sub, emailNormalized, `${displayName} (Google)`, nowIso, nowIso)
+        .bind(newUserId, provider, sub, emailNormalized || null, `${displayName} (${providerLabel})`, nowIso, nowIso)
         .run();
       const { cookieHeader } = await createSessionForUser(newUserId, params.env);
       return { ok: true, userId: newUserId, serviceRole: 'admin', cookieHeader, isNewUser: true };
@@ -722,15 +748,15 @@ async function authenticateGoogleIdentity(params: {
           `INSERT INTO users (public_id, email, display_name, role, service_role, plan_tier, monthly_ocr_used, monthly_ocr_limit, terms_accepted_at, created_at)
            VALUES (?, ?, ?, 'member', 'user', 'free', 0, 10, ?, ?)`
         )
-        .bind(publicId, emailNormalized, displayName, nowIso, nowIso)
+        .bind(publicId, emailNormalized || null, displayName, nowIso, nowIso)
         .run();
       const newUserId = Number(insertUser.meta?.last_row_id || 2);
       await db
         .prepare(
           `INSERT INTO auth_identities (user_id, provider, provider_subject, email_snapshot, display_name_snapshot, linked_at, last_used_at)
-           VALUES (?, 'google', ?, ?, ?, ?, ?)`
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
         )
-        .bind(newUserId, sub, emailNormalized, `${displayName} (Google)`, nowIso, nowIso)
+        .bind(newUserId, provider, sub, emailNormalized || null, `${displayName} (${providerLabel})`, nowIso, nowIso)
         .run();
       const { cookieHeader } = await createSessionForUser(newUserId, params.env);
       return { ok: true, userId: newUserId, serviceRole: 'user', cookieHeader, isNewUser: true };
@@ -758,7 +784,7 @@ async function authenticateGoogleIdentity(params: {
       return { ok: false, reason: 'expired' };
     }
     const invEmail = normalizeEmail(invRow.email_normalized);
-    if (invEmail && invEmail !== emailNormalized) {
+    if (invEmail && (!emailNormalized || invEmail !== emailNormalized)) {
       return { ok: false, reason: 'email_mismatch' };
     }
 
@@ -768,7 +794,7 @@ async function authenticateGoogleIdentity(params: {
         `INSERT INTO users (public_id, email, display_name, role, service_role, plan_tier, monthly_ocr_used, monthly_ocr_limit, terms_accepted_at, created_at)
          VALUES (?, ?, ?, 'member', 'user', 'free', 0, 10, ?, ?)`
       )
-      .bind(publicId, emailNormalized, displayName, nowIso, nowIso)
+      .bind(publicId, emailNormalized || null, displayName, nowIso, nowIso)
       .run();
     const newUserId = Number(insertUser.meta?.last_row_id || 2);
 
@@ -782,9 +808,9 @@ async function authenticateGoogleIdentity(params: {
     await db
       .prepare(
         `INSERT INTO auth_identities (user_id, provider, provider_subject, email_snapshot, display_name_snapshot, linked_at, last_used_at)
-         VALUES (?, 'google', ?, ?, ?, ?, ?)`
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
       )
-      .bind(newUserId, sub, emailNormalized, `${displayName} (Google)`, nowIso, nowIso)
+      .bind(newUserId, provider, sub, emailNormalized || null, `${displayName} (${providerLabel})`, nowIso, nowIso)
       .run();
 
     const { cookieHeader } = await createSessionForUser(newUserId, params.env);
@@ -793,7 +819,7 @@ async function authenticateGoogleIdentity(params: {
 
   // In-memory store flow
   const existingIdentity = authMemory.identities.find(
-    (id) => id.provider === 'google' && id.provider_subject === sub
+    (id) => id.provider === provider && id.provider_subject === sub
   );
   if (existingIdentity) {
     existingIdentity.last_used_at = nowIso;
@@ -813,7 +839,7 @@ async function authenticateGoogleIdentity(params: {
     authMemory.bootstrapAdminClaimed ||
     authMemory.users.some((u) => u.service_role === 'admin' && !u.is_demo_seed);
 
-  if (!hasRealAdmin && bootstrapOwnerEmail && emailNormalized === bootstrapOwnerEmail) {
+  if (!hasRealAdmin && bootstrapOwnerEmail && emailNormalized && emailNormalized === bootstrapOwnerEmail) {
     authMemory.bootstrapAdminClaimed = true;
     const newUserId = authMemory.nextUserId++;
     const newUser: InternalUserRecord = {
@@ -834,10 +860,10 @@ async function authenticateGoogleIdentity(params: {
     authMemory.identities.push({
       id: authMemory.nextIdentityId++,
       user_id: newUserId,
-      provider: 'google',
+      provider,
       provider_subject: sub,
-      email_snapshot: emailNormalized,
-      display_name_snapshot: `${displayName} (Google)`,
+      email_snapshot: emailNormalized || null,
+      display_name_snapshot: `${displayName} (${providerLabel})`,
       linked_at: nowIso,
       last_used_at: nowIso,
     });
@@ -851,7 +877,7 @@ async function authenticateGoogleIdentity(params: {
     const newUser: InternalUserRecord = {
       id: newUserId,
       public_id: `u_${randomBytesHex(8)}`,
-      email: emailNormalized,
+      email: emailNormalized || null,
       display_name: displayName,
       role: 'member',
       service_role: 'user',
@@ -866,10 +892,10 @@ async function authenticateGoogleIdentity(params: {
     authMemory.identities.push({
       id: authMemory.nextIdentityId++,
       user_id: newUserId,
-      provider: 'google',
+      provider,
       provider_subject: sub,
-      email_snapshot: emailNormalized,
-      display_name_snapshot: `${displayName} (Google)`,
+      email_snapshot: emailNormalized || null,
+      display_name_snapshot: `${displayName} (${providerLabel})`,
       linked_at: nowIso,
       last_used_at: nowIso,
     });
@@ -896,11 +922,10 @@ async function authenticateGoogleIdentity(params: {
   if (status === 'expired') {
     return { ok: false, reason: 'expired' };
   }
-  if (invitation.email_normalized && invitation.email_normalized !== emailNormalized) {
+  if (invitation.email_normalized && (!emailNormalized || invitation.email_normalized !== emailNormalized)) {
     return { ok: false, reason: 'email_mismatch' };
   }
 
-  // 原子的消費 + User & Identity & Session 作成
   const newUserId = authMemory.nextUserId++;
   invitation.consumed_by = newUserId;
   invitation.consumed_at = nowIso;
@@ -908,7 +933,7 @@ async function authenticateGoogleIdentity(params: {
   const newUser: InternalUserRecord = {
     id: newUserId,
     public_id: `u_${randomBytesHex(8)}`,
-    email: emailNormalized,
+    email: emailNormalized || null,
     display_name: displayName,
     role: 'member',
     service_role: 'user',
@@ -923,16 +948,98 @@ async function authenticateGoogleIdentity(params: {
   authMemory.identities.push({
     id: authMemory.nextIdentityId++,
     user_id: newUserId,
-    provider: 'google',
+    provider,
     provider_subject: sub,
-    email_snapshot: emailNormalized,
-    display_name_snapshot: `${displayName} (Google)`,
+    email_snapshot: emailNormalized || null,
+    display_name_snapshot: `${displayName} (${providerLabel})`,
     linked_at: nowIso,
     last_used_at: nowIso,
   });
 
   const { cookieHeader } = await createSessionForUser(newUserId, params.env);
   return { ok: true, userId: newUserId, serviceRole: 'user', cookieHeader, isNewUser: true };
+}
+
+async function linkExternalIdentityToUser(params: {
+  userId: number;
+  provider: AuthProviderId;
+  sub: string;
+  email: string | null;
+  displayName: string;
+  env: AuthEnv & { DB?: D1DatabaseLike };
+}): Promise<{ ok: boolean; reason?: 'identity_conflict' | 'already_linked' }> {
+  const { userId, provider, sub, email, displayName, env } = params;
+  const providerLabel = getProviderLabel(provider);
+  const nowIso = new Date().toISOString();
+  const displaySnapshot = `${displayName || '利用者'} (${providerLabel})`;
+
+  if (env.DB) {
+    const existingBySub = await env.DB.prepare(
+      `SELECT * FROM auth_identities WHERE provider = ? AND provider_subject = ?`
+    )
+      .bind(provider, sub)
+      .first<Record<string, unknown>>();
+    if (existingBySub) {
+      return {
+        ok: false,
+        reason: Number(existingBySub.user_id) === userId ? 'already_linked' : 'identity_conflict',
+      };
+    }
+
+    const existingByProvider = await env.DB.prepare(
+      `SELECT * FROM auth_identities WHERE user_id = ? AND provider = ?`
+    )
+      .bind(userId, provider)
+      .first<Record<string, unknown>>();
+    if (existingByProvider) {
+      return { ok: false, reason: 'already_linked' };
+    }
+
+    await env.DB.prepare(
+      `INSERT INTO auth_identities (user_id, provider, provider_subject, email_snapshot, display_name_snapshot, linked_at, last_used_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(userId, provider, sub, email || null, displaySnapshot, nowIso, nowIso)
+      .run();
+    return { ok: true };
+  }
+
+  const conflictBySub = authMemory.identities.find(
+    (id) => id.provider === provider && id.provider_subject === sub
+  );
+  if (conflictBySub) {
+    return {
+      ok: false,
+      reason: conflictBySub.user_id === userId ? 'already_linked' : 'identity_conflict',
+    };
+  }
+  const conflictByProvider = authMemory.identities.find(
+    (id) => id.user_id === userId && id.provider === provider
+  );
+  if (conflictByProvider) {
+    return { ok: false, reason: 'already_linked' };
+  }
+  authMemory.identities.push({
+    id: authMemory.nextIdentityId++,
+    user_id: userId,
+    provider,
+    provider_subject: sub,
+    email_snapshot: email || null,
+    display_name_snapshot: displaySnapshot,
+    linked_at: nowIso,
+    last_used_at: nowIso,
+  });
+  return { ok: true };
+}
+
+async function authenticateGoogleIdentity(params: {
+  email: string;
+  sub: string;
+  displayName?: string;
+  inviteToken?: string | null;
+  env: AuthEnv & { DB?: D1DatabaseLike };
+}) {
+  return authenticateExternalIdentity({ ...params, provider: 'google' });
 }
 
 /**
@@ -1024,6 +1131,8 @@ export async function handleAuthAndInviteRoutes(params: {
 
       const txCookieVal = await signOAuthTransaction(
         {
+          provider: 'google',
+          mode: 'login',
           state,
           nonce,
           codeVerifier,
@@ -1386,6 +1495,47 @@ export async function handleAuthAndInviteRoutes(params: {
         url.searchParams.get('mock_name')?.trim() || emailNormalized.split('@')[0];
     }
 
+    // mode === 'link' の場合はログイン中セッションのユーザーへ後追い連携する
+    if (verifiedTx?.mode === 'link' && verifiedTx.linkUserId) {
+      const currentCtx = await resolveCurrentSessionContext(request, env, fallbackProfile);
+      if (!currentCtx.authenticated || !currentCtx.user || currentCtx.user.id !== verifiedTx.linkUserId) {
+        return wantsHtmlRedirect
+          ? buildCallbackErrorRedirect('oauth_state_invalid')
+          : createErrorResponse('AUTH_SESSION_REQUIRED', requestId, {
+              route: path,
+              headers: {
+                ...AUTH_NO_STORE_HEADERS,
+                'Set-Cookie': buildOAuthCookieHeader('', 0),
+              },
+            });
+      }
+      const linkResult = await linkExternalIdentityToUser({
+        userId: currentCtx.user.id,
+        provider: 'google',
+        sub: resolvedSub,
+        email: emailNormalized || null,
+        displayName: resolvedName,
+        env,
+      });
+      if (!linkResult.ok) {
+        return wantsHtmlRedirect
+          ? buildCallbackErrorRedirect(linkResult.reason || 'identity_conflict')
+          : createStateConflictResponse(
+              'この Google アカウントは既に別の利用者に連携されています。',
+              requestId,
+              path
+            );
+      }
+      const okLinkRes = new Response(null, {
+        status: 302,
+        headers: {
+          Location: '/?auth_linked=google',
+          'Set-Cookie': buildOAuthCookieHeader('', 0),
+        },
+      });
+      return finalizeResponse(okLinkRes, requestId, { ...AUTH_NO_STORE_HEADERS });
+    }
+
     const authResult = await authenticateGoogleIdentity({
       email: emailNormalized,
       sub: resolvedSub,
@@ -1442,6 +1592,462 @@ export async function handleAuthAndInviteRoutes(params: {
         ...(authResult.cookieHeader ? { 'Set-Cookie': authResult.cookieHeader } : {}),
       }
     );
+  }
+
+  // 3.5 Google / LINE / Amazon 実 OAuth 開始・後追い連携・コールバック
+  // GET /api/auth/google/link
+  if (path === '/api/auth/google/link') {
+    if (method !== 'GET') {
+      return createErrorResponse('METHOD_NOT_ALLOWED', requestId, {
+        route: path,
+        headers: AUTH_NO_STORE_HEADERS,
+      });
+    }
+    const ctx = await resolveCurrentSessionContext(request, env, fallbackProfile);
+    if (!ctx.authenticated || !ctx.user) {
+      return createErrorResponse('AUTH_SESSION_REQUIRED', requestId, {
+        route: path,
+        headers: AUTH_NO_STORE_HEADERS,
+      });
+    }
+    if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.GOOGLE_REDIRECT_URI) {
+      return createStateConflictResponse('Google ログインの設定が未完了です。', requestId, path);
+    }
+    const state = randomBytesHex(16);
+    const nonce = randomBytesHex(16);
+    const codeVerifier = base64UrlEncode(randomBytesHex(32));
+    const codeChallenge = await sha256Base64Url(codeVerifier);
+    const txCookieVal = await signOAuthTransaction(
+      {
+        provider: 'google',
+        mode: 'link',
+        linkUserId: ctx.user.id,
+        state,
+        nonce,
+        codeVerifier,
+        invite: null,
+        exp: Date.now() + OAUTH_MAX_AGE_SECONDS * 1000,
+      },
+      env
+    );
+    const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    authUrl.searchParams.set('client_id', env.GOOGLE_CLIENT_ID);
+    authUrl.searchParams.set('redirect_uri', env.GOOGLE_REDIRECT_URI);
+    authUrl.searchParams.set('response_type', 'code');
+    authUrl.searchParams.set('scope', 'openid email profile');
+    authUrl.searchParams.set('prompt', 'select_account');
+    authUrl.searchParams.set('state', state);
+    authUrl.searchParams.set('nonce', nonce);
+    authUrl.searchParams.set('code_challenge', codeChallenge);
+    authUrl.searchParams.set('code_challenge_method', 'S256');
+    const redirectRes = new Response(null, {
+      status: 302,
+      headers: {
+        Location: authUrl.toString(),
+        'Set-Cookie': buildOAuthCookieHeader(txCookieVal),
+      },
+    });
+    return finalizeResponse(redirectRes, requestId, { ...AUTH_NO_STORE_HEADERS });
+  }
+
+  // LINE Login: GET /api/auth/line/start | /api/auth/line/link
+  if (path === '/api/auth/line/start' || path === '/api/auth/line/link') {
+    if (method !== 'GET') {
+      return createErrorResponse('METHOD_NOT_ALLOWED', requestId, {
+        route: path,
+        headers: AUTH_NO_STORE_HEADERS,
+      });
+    }
+    const isLinkMode = path === '/api/auth/line/link';
+    let linkUserId: number | undefined;
+    if (isLinkMode) {
+      const ctx = await resolveCurrentSessionContext(request, env, fallbackProfile);
+      if (!ctx.authenticated || !ctx.user) {
+        return createErrorResponse('AUTH_SESSION_REQUIRED', requestId, {
+          route: path,
+          headers: AUTH_NO_STORE_HEADERS,
+        });
+      }
+      linkUserId = ctx.user.id;
+    }
+
+    if (!env.LINE_CHANNEL_ID || !env.LINE_CHANNEL_SECRET || !env.LINE_REDIRECT_URI) {
+      return createStateConflictResponse(
+        'LINE ログインはまだ設定されていません。管理者が LINE Developers の設定を登録すると利用できます。',
+        requestId,
+        path
+      );
+    }
+
+    const inviteToken = isLinkMode ? null : url.searchParams.get('invite')?.trim() || null;
+    const state = randomBytesHex(16);
+    const nonce = randomBytesHex(16);
+    const codeVerifier = base64UrlEncode(randomBytesHex(32));
+    const codeChallenge = await sha256Base64Url(codeVerifier);
+    const txCookieVal = await signOAuthTransaction(
+      {
+        provider: 'line',
+        mode: isLinkMode ? 'link' : 'login',
+        linkUserId,
+        state,
+        nonce,
+        codeVerifier,
+        invite: inviteToken,
+        exp: Date.now() + OAUTH_MAX_AGE_SECONDS * 1000,
+      },
+      env
+    );
+
+    const authUrl = new URL('https://access.line.me/oauth2/v2.1/authorize');
+    authUrl.searchParams.set('response_type', 'code');
+    authUrl.searchParams.set('client_id', env.LINE_CHANNEL_ID);
+    authUrl.searchParams.set('redirect_uri', env.LINE_REDIRECT_URI);
+    authUrl.searchParams.set('state', state);
+    authUrl.searchParams.set('scope', 'profile openid email');
+    authUrl.searchParams.set('nonce', nonce);
+    authUrl.searchParams.set('code_challenge', codeChallenge);
+    authUrl.searchParams.set('code_challenge_method', 'S256');
+
+    const redirectRes = new Response(null, {
+      status: 302,
+      headers: {
+        Location: authUrl.toString(),
+        'Set-Cookie': buildOAuthCookieHeader(txCookieVal),
+      },
+    });
+    return finalizeResponse(redirectRes, requestId, { ...AUTH_NO_STORE_HEADERS });
+  }
+
+  // LINE Login Callback: GET /api/auth/line/callback
+  if (path === '/api/auth/line/callback') {
+    if (method !== 'GET') {
+      return createErrorResponse('METHOD_NOT_ALLOWED', requestId, {
+        route: path,
+        headers: AUTH_NO_STORE_HEADERS,
+      });
+    }
+    const buildLineErrRedirect = (reason: string): Response => {
+      const errRes = new Response(null, {
+        status: 302,
+        headers: {
+          Location: `/?auth_error=${encodeURIComponent(reason)}`,
+          'Set-Cookie': buildOAuthCookieHeader('', 0),
+        },
+      });
+      return finalizeResponse(errRes, requestId, { ...AUTH_NO_STORE_HEADERS });
+    };
+
+    if (url.searchParams.get('error')) {
+      return buildLineErrRedirect('oauth_cancelled');
+    }
+
+    const cookies = parseCookies(request);
+    const tx = await verifyOAuthTransaction(cookies[OAUTH_COOKIE_NAME], env);
+    const stateParam = url.searchParams.get('state')?.trim() || '';
+    const codeParam = url.searchParams.get('code')?.trim() || '';
+    if (
+      !tx ||
+      tx.provider !== 'line' ||
+      !codeParam ||
+      !stateParam ||
+      !constantTimeEqual(stateParam, tx.state) ||
+      !env.LINE_CHANNEL_ID ||
+      !env.LINE_CHANNEL_SECRET ||
+      !env.LINE_REDIRECT_URI
+    ) {
+      return buildLineErrRedirect('oauth_state_invalid');
+    }
+
+    // 1. LINE Token Endpoint へ PKCE 認可コード交換
+    let tokenData: { id_token?: string; access_token?: string } | null = null;
+    try {
+      const tokenBody = new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: codeParam,
+        redirect_uri: env.LINE_REDIRECT_URI,
+        client_id: env.LINE_CHANNEL_ID,
+        client_secret: env.LINE_CHANNEL_SECRET,
+        code_verifier: tx.codeVerifier,
+      });
+      const tokenRes = await fetch('https://api.line.me/oauth2/v2.1/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: tokenBody.toString(),
+      });
+      if (!tokenRes.ok) return buildLineErrRedirect('oauth_failed');
+      tokenData = (await tokenRes.json()) as { id_token?: string; access_token?: string };
+    } catch {
+      return buildLineErrRedirect('oauth_failed');
+    }
+
+    if (!tokenData?.id_token) return buildLineErrRedirect('oauth_failed');
+
+    // 2. LINE 公式 Verify Endpoint で ID トークン・nonce をサーバー検証
+    let verifiedLine: { sub?: string; name?: string; email?: string } | null = null;
+    try {
+      const verifyBody = new URLSearchParams({
+        id_token: tokenData.id_token,
+        client_id: env.LINE_CHANNEL_ID,
+        nonce: tx.nonce,
+      });
+      const verifyRes = await fetch('https://api.line.me/oauth2/v2.1/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: verifyBody.toString(),
+      });
+      if (!verifyRes.ok) return buildLineErrRedirect('oauth_failed');
+      verifiedLine = (await verifyRes.json()) as { sub?: string; name?: string; email?: string };
+    } catch {
+      return buildLineErrRedirect('oauth_failed');
+    }
+
+    const lineSub = String(verifiedLine?.sub || '').trim();
+    const lineEmail = normalizeEmail(verifiedLine?.email || '');
+    const lineName = String(verifiedLine?.name || 'LINE利用者').trim();
+    if (!lineSub) return buildLineErrRedirect('oauth_failed');
+
+    // 3. 後追い連携モード
+    if (tx.mode === 'link' && tx.linkUserId) {
+      const currentCtx = await resolveCurrentSessionContext(request, env, fallbackProfile);
+      if (!currentCtx.authenticated || !currentCtx.user || currentCtx.user.id !== tx.linkUserId) {
+        return buildLineErrRedirect('oauth_state_invalid');
+      }
+      const linkResult = await linkExternalIdentityToUser({
+        userId: currentCtx.user.id,
+        provider: 'line',
+        sub: lineSub,
+        email: lineEmail || null,
+        displayName: lineName,
+        env,
+      });
+      if (!linkResult.ok) {
+        return buildLineErrRedirect(linkResult.reason || 'identity_conflict');
+      }
+      const okLinkRes = new Response(null, {
+        status: 302,
+        headers: {
+          Location: '/?auth_linked=line',
+          'Set-Cookie': buildOAuthCookieHeader('', 0),
+        },
+      });
+      return finalizeResponse(okLinkRes, requestId, { ...AUTH_NO_STORE_HEADERS });
+    }
+
+    // 4. ログイン / 招待登録モード
+    const authResult = await authenticateExternalIdentity({
+      provider: 'line',
+      email: lineEmail,
+      sub: lineSub,
+      displayName: lineName,
+      inviteToken: tx.invite,
+      env,
+    });
+    if (!authResult.ok) {
+      return buildLineErrRedirect(authResult.reason || 'not_invited');
+    }
+
+    const headers = new Headers({ Location: '/' });
+    headers.append('Set-Cookie', buildOAuthCookieHeader('', 0));
+    if (authResult.cookieHeader) {
+      headers.append('Set-Cookie', authResult.cookieHeader);
+    }
+    return finalizeResponse(new Response(null, { status: 302, headers }), requestId, {
+      ...AUTH_NO_STORE_HEADERS,
+    });
+  }
+
+  // Login with Amazon: GET /api/auth/amazon/start | /api/auth/amazon/link
+  if (path === '/api/auth/amazon/start' || path === '/api/auth/amazon/link') {
+    if (method !== 'GET') {
+      return createErrorResponse('METHOD_NOT_ALLOWED', requestId, {
+        route: path,
+        headers: AUTH_NO_STORE_HEADERS,
+      });
+    }
+    const isLinkMode = path === '/api/auth/amazon/link';
+    let linkUserId: number | undefined;
+    if (isLinkMode) {
+      const ctx = await resolveCurrentSessionContext(request, env, fallbackProfile);
+      if (!ctx.authenticated || !ctx.user) {
+        return createErrorResponse('AUTH_SESSION_REQUIRED', requestId, {
+          route: path,
+          headers: AUTH_NO_STORE_HEADERS,
+        });
+      }
+      linkUserId = ctx.user.id;
+    }
+
+    if (!env.AMAZON_CLIENT_ID || !env.AMAZON_CLIENT_SECRET || !env.AMAZON_REDIRECT_URI) {
+      return createStateConflictResponse(
+        'Amazon ログインはまだ設定されていません。管理者が Login with Amazon の設定を登録すると利用できます。',
+        requestId,
+        path
+      );
+    }
+
+    const inviteToken = isLinkMode ? null : url.searchParams.get('invite')?.trim() || null;
+    const state = randomBytesHex(16);
+    const nonce = randomBytesHex(16);
+    const codeVerifier = base64UrlEncode(randomBytesHex(32));
+    const txCookieVal = await signOAuthTransaction(
+      {
+        provider: 'amazon',
+        mode: isLinkMode ? 'link' : 'login',
+        linkUserId,
+        state,
+        nonce,
+        codeVerifier,
+        invite: inviteToken,
+        exp: Date.now() + OAUTH_MAX_AGE_SECONDS * 1000,
+      },
+      env
+    );
+
+    const authUrl = new URL('https://www.amazon.com/ap/oa');
+    authUrl.searchParams.set('client_id', env.AMAZON_CLIENT_ID);
+    authUrl.searchParams.set('scope', 'profile');
+    authUrl.searchParams.set('response_type', 'code');
+    authUrl.searchParams.set('redirect_uri', env.AMAZON_REDIRECT_URI);
+    authUrl.searchParams.set('state', state);
+
+    const redirectRes = new Response(null, {
+      status: 302,
+      headers: {
+        Location: authUrl.toString(),
+        'Set-Cookie': buildOAuthCookieHeader(txCookieVal),
+      },
+    });
+    return finalizeResponse(redirectRes, requestId, { ...AUTH_NO_STORE_HEADERS });
+  }
+
+  // Login with Amazon Callback: GET /api/auth/amazon/callback
+  if (path === '/api/auth/amazon/callback') {
+    if (method !== 'GET') {
+      return createErrorResponse('METHOD_NOT_ALLOWED', requestId, {
+        route: path,
+        headers: AUTH_NO_STORE_HEADERS,
+      });
+    }
+    const buildAmzErrRedirect = (reason: string): Response => {
+      const errRes = new Response(null, {
+        status: 302,
+        headers: {
+          Location: `/?auth_error=${encodeURIComponent(reason)}`,
+          'Set-Cookie': buildOAuthCookieHeader('', 0),
+        },
+      });
+      return finalizeResponse(errRes, requestId, { ...AUTH_NO_STORE_HEADERS });
+    };
+
+    if (url.searchParams.get('error')) {
+      return buildAmzErrRedirect('oauth_cancelled');
+    }
+
+    const cookies = parseCookies(request);
+    const tx = await verifyOAuthTransaction(cookies[OAUTH_COOKIE_NAME], env);
+    const stateParam = url.searchParams.get('state')?.trim() || '';
+    const codeParam = url.searchParams.get('code')?.trim() || '';
+    if (
+      !tx ||
+      tx.provider !== 'amazon' ||
+      !codeParam ||
+      !stateParam ||
+      !constantTimeEqual(stateParam, tx.state) ||
+      !env.AMAZON_CLIENT_ID ||
+      !env.AMAZON_CLIENT_SECRET ||
+      !env.AMAZON_REDIRECT_URI
+    ) {
+      return buildAmzErrRedirect('oauth_state_invalid');
+    }
+
+    // 1. Amazon Token Endpoint へ認可コード交換
+    let accessToken = '';
+    try {
+      const tokenBody = new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: codeParam,
+        redirect_uri: env.AMAZON_REDIRECT_URI,
+        client_id: env.AMAZON_CLIENT_ID,
+        client_secret: env.AMAZON_CLIENT_SECRET,
+      });
+      const tokenRes = await fetch('https://api.amazon.com/auth/o2/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: tokenBody.toString(),
+      });
+      if (!tokenRes.ok) return buildAmzErrRedirect('oauth_failed');
+      const tokenJson = (await tokenRes.json()) as { access_token?: string };
+      accessToken = String(tokenJson?.access_token || '').trim();
+    } catch {
+      return buildAmzErrRedirect('oauth_failed');
+    }
+    if (!accessToken) return buildAmzErrRedirect('oauth_failed');
+
+    // 2. Amazon User Profile 取得
+    let amzProfile: { user_id?: string; email?: string; name?: string } | null = null;
+    try {
+      const profileRes = await fetch('https://api.amazon.com/user/profile', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!profileRes.ok) return buildAmzErrRedirect('oauth_failed');
+      amzProfile = (await profileRes.json()) as { user_id?: string; email?: string; name?: string };
+    } catch {
+      return buildAmzErrRedirect('oauth_failed');
+    }
+
+    const amzSub = String(amzProfile?.user_id || '').trim();
+    const amzEmail = normalizeEmail(amzProfile?.email || '');
+    const amzName = String(amzProfile?.name || (amzEmail ? amzEmail.split('@')[0] : 'Amazon利用者')).trim();
+    if (!amzSub) return buildAmzErrRedirect('oauth_failed');
+
+    // 3. 後追い連携モード
+    if (tx.mode === 'link' && tx.linkUserId) {
+      const currentCtx = await resolveCurrentSessionContext(request, env, fallbackProfile);
+      if (!currentCtx.authenticated || !currentCtx.user || currentCtx.user.id !== tx.linkUserId) {
+        return buildAmzErrRedirect('oauth_state_invalid');
+      }
+      const linkResult = await linkExternalIdentityToUser({
+        userId: currentCtx.user.id,
+        provider: 'amazon',
+        sub: amzSub,
+        email: amzEmail || null,
+        displayName: amzName,
+        env,
+      });
+      if (!linkResult.ok) {
+        return buildAmzErrRedirect(linkResult.reason || 'identity_conflict');
+      }
+      const okLinkRes = new Response(null, {
+        status: 302,
+        headers: {
+          Location: '/?auth_linked=amazon',
+          'Set-Cookie': buildOAuthCookieHeader('', 0),
+        },
+      });
+      return finalizeResponse(okLinkRes, requestId, { ...AUTH_NO_STORE_HEADERS });
+    }
+
+    // 4. ログイン / 招待登録モード
+    const authResult = await authenticateExternalIdentity({
+      provider: 'amazon',
+      email: amzEmail,
+      sub: amzSub,
+      displayName: amzName,
+      inviteToken: tx.invite,
+      env,
+    });
+    if (!authResult.ok) {
+      return buildAmzErrRedirect(authResult.reason || 'not_invited');
+    }
+
+    const headers = new Headers({ Location: '/' });
+    headers.append('Set-Cookie', buildOAuthCookieHeader('', 0));
+    if (authResult.cookieHeader) {
+      headers.append('Set-Cookie', authResult.cookieHeader);
+    }
+    return finalizeResponse(new Response(null, { status: 302, headers }), requestId, {
+      ...AUTH_NO_STORE_HEADERS,
+    });
   }
 
   // 4. POST /api/auth/invitations (Owner service_role='admin' のみ)

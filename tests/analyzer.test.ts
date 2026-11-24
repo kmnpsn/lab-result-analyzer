@@ -1292,4 +1292,47 @@ describe('本番ログイン・初回Owner・招待制・SNS後追い連携 (wor
     );
     assert.equal(unlinkGoogleRes.status, 409);
   });
+
+  it('LINE Login / Login with Amazon は Secret 設定時に自動有効化され、認可 URL と後追い連携リダイレクトが動作する', async () => {
+    const multiEnv = {
+      AUTH_MODE: 'production',
+      GOOGLE_CLIENT_ID: 'g-id',
+      GOOGLE_CLIENT_SECRET: 'g-sec',
+      GOOGLE_REDIRECT_URI: 'https://example.workers.dev/api/auth/google/callback',
+      LINE_CHANNEL_ID: '2000000001',
+      LINE_CHANNEL_SECRET: 'line-sec',
+      LINE_REDIRECT_URI: 'https://example.workers.dev/api/auth/line/callback',
+      AMAZON_CLIENT_ID: 'amzn1.application-oa2-client.test',
+      AMAZON_CLIENT_SECRET: 'amz-sec',
+      AMAZON_REDIRECT_URI: 'https://example.workers.dev/api/auth/amazon/callback',
+      SESSION_SECRET: 'test-multi-secret',
+      OAUTH_TRANSACTION_SECRET: 'test-multi-oauth-secret',
+    };
+
+    const sessRes = await worker.fetch(new Request('http://localhost/api/auth/session'), multiEnv);
+    const sess = (await sessRes.json()) as AccountSummary;
+    assert.deepEqual(sess.enabled_auth_providers, ['google', 'line', 'amazon']);
+
+    // LINE Login 認可リダイレクト (PKCE + nonce + __Host-karada_oauth Cookie)
+    const lineStart = await worker.fetch(
+      new Request('http://localhost/api/auth/line/start?invite=tok123'),
+      multiEnv
+    );
+    assert.equal(lineStart.status, 302);
+    const lineLoc = lineStart.headers.get('location') || '';
+    assert.ok(lineLoc.startsWith('https://access.line.me/oauth2/v2.1/authorize?'));
+    assert.ok(lineLoc.includes('code_challenge_method=S256'));
+    assert.ok((lineStart.headers.get('set-cookie') || '').includes('__Host-karada_oauth='));
+
+    // Amazon Login 認可リダイレクト
+    const amzStart = await worker.fetch(new Request('http://localhost/api/auth/amazon/start'), multiEnv);
+    assert.equal(amzStart.status, 302);
+    const amzLoc = amzStart.headers.get('location') || '';
+    assert.ok(amzLoc.startsWith('https://www.amazon.com/ap/oa?'));
+    assert.ok(amzLoc.includes('scope=profile'));
+
+    // 未ログインでの /link は 401 AUTH_SESSION_REQUIRED
+    const unauthLink = await worker.fetch(new Request('http://localhost/api/auth/line/link'), multiEnv);
+    assert.equal(unauthLink.status, 401);
+  });
 });

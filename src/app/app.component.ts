@@ -239,10 +239,21 @@ export class AppComponent implements OnInit {
         this.authErrorBanner =
           'この招待リンクは期限切れ・使用済み、または取り消し済みです。管理者へ再発行を依頼してください。';
       } else if (authError === 'oauth_cancelled') {
-        this.authErrorBanner = 'Google ログインがキャンセルされました。もう一度お試しください。';
+        this.authErrorBanner = 'ログインがキャンセルされました。もう一度お試しください。';
+      } else if (authError === 'identity_conflict') {
+        this.authErrorBanner =
+          'この SNS アカウントはすでに別の利用者に連携されているため紐付けできません。';
+      } else if (authError === 'already_linked') {
+        this.authErrorBanner = 'このログイン方法はすでに現在のアカウントに連携済みです。';
       } else if (authError) {
         this.authErrorBanner =
           'ログイン処理が完了できませんでした。時間をおいてもう一度お試しください。';
+      }
+
+      const authLinked = params.get('auth_linked');
+      if (authLinked) {
+        const label = AUTH_PROVIDERS.find((p) => p.id === authLinked)?.label || authLinked;
+        this.showToast(`${label} アカウントの連携が完了しました`, 'success');
       }
     }
   }
@@ -1651,8 +1662,12 @@ export class AppComponent implements OnInit {
   }
 
   startGoogleLogin(inviteToken?: string): void {
+    this.startProviderLogin('google', inviteToken);
+  }
+
+  startProviderLogin(provider: AuthProviderId, inviteToken?: string): void {
     if (typeof window === 'undefined') return;
-    const url = this.api.getGoogleLoginUrl(inviteToken);
+    const url = this.api.getProviderLoginUrl(provider, inviteToken);
     if (this.api.isOffline) {
       this.account = {
         ...this.account,
@@ -1660,7 +1675,7 @@ export class AppComponent implements OnInit {
         email: this.account.email || 'owner@example.com',
       };
       this.dismissInviteBanner();
-      this.showToast('デモ環境で Google ログインを実行しました', 'success');
+      this.showToast('デモ環境でログインを実行しました', 'success');
       return;
     }
     window.location.href = url;
@@ -1668,6 +1683,16 @@ export class AppComponent implements OnInit {
 
   async linkProvider(provider: AuthProviderMeta): Promise<void> {
     if (this.linkingProvider) return;
+    // 本番モードで開通済みの外部プロバイダは実 OAuth 認可画面へ遷移して安全に後追い連携する
+    if (
+      typeof window !== 'undefined' &&
+      !this.api.isOffline &&
+      this.account.auth_mode === 'production' &&
+      this.isProviderEnabled(provider.id)
+    ) {
+      window.location.href = this.api.getProviderLinkUrl(provider.id);
+      return;
+    }
     this.linkingProvider = provider.id;
     try {
       const updated = await this.api.linkIdentity({

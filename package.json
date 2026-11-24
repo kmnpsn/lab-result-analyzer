@@ -11,6 +11,8 @@
     "dev:worker": "node scripts/run-wrangler.mjs dev",
     "cf:config": "bash scripts/set-cloudflare-config.sh",
     "cf:oauth": "bash scripts/setup-google-oauth.sh",
+    "cf:line": "bash scripts/setup-line-oauth.sh",
+    "cf:amazon": "bash scripts/setup-amazon-oauth.sh",
     "db:migrate:local": "node scripts/run-wrangler.mjs d1 migrations apply lab-result-db --local",
     "db:migrate:remote": "node scripts/run-wrangler.mjs d1 migrations apply lab-result-db --remote",
     "deploy": "npm run build:web && node scripts/run-wrangler.mjs deploy",

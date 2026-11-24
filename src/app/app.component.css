@@ -2113,6 +2113,10 @@ button:disabled {
 .auth-gate-actions {
   width: 100%;
   margin-top: 0.4rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
 }
 
 .auth-gate-btn {
@@ -2120,6 +2124,18 @@ button:disabled {
   max-width: 320px;
   padding: 0.78rem 1.25rem;
   font-size: 0.98rem;
+}
+
+.auth-gate-btn[data-provider='line'] {
+  background: #06c755;
+  border-color: #06c755;
+  color: #ffffff;
+}
+
+.auth-gate-btn[data-provider='amazon'] {
+  background: #f59e0b;
+  border-color: #f59e0b;
+  color: #0f172a;
 }
 
 .auth-gate-note {

@@ -211,14 +211,19 @@
             }
           </p>
           <div class="auth-gate-actions">
-            <button
-              type="button"
-              class="btn-primary auth-gate-btn"
-              [disabled]="authBusy"
-              (click)="startGoogleLogin(inviteState === 'valid' ? (inviteToken ?? undefined) : undefined)"
-            >
-              {{ inviteState === 'valid' ? 'Google で登録してはじめる' : 'Google アカウントでログイン' }}
-            </button>
+            @for (p of authProviders; track p.id) {
+              @if (isProviderEnabled(p.id)) {
+                <button
+                  type="button"
+                  class="btn-primary auth-gate-btn"
+                  [attr.data-provider]="p.id"
+                  [disabled]="authBusy"
+                  (click)="startProviderLogin(p.id, inviteState === 'valid' ? (inviteToken ?? undefined) : undefined)"
+                >
+                  {{ inviteState === 'valid' ? p.label + ' で登録してはじめる' : p.label + ' でログイン' }}
+                </button>
+              }
+            }
           </div>
           <p class="auth-gate-note">
             ※ 現在は招待制（クローズド運用）です。初めての方は管理者（Owner）から受け取った招待リンクからアクセスしてください。

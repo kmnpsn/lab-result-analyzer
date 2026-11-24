@@ -560,10 +560,19 @@ export class ApiService {
   // ===== 認証・招待・SNS後追い連携・アカウント管理 =====
 
   getGoogleLoginUrl(inviteToken?: string): string {
+    return this.getProviderLoginUrl('google', inviteToken);
+  }
+
+  getProviderLoginUrl(provider: AuthProviderId, inviteToken?: string): string {
+    const base = `/api/auth/${encodeURIComponent(provider)}/start`;
     if (inviteToken && inviteToken.trim()) {
-      return `/api/auth/google/start?invite=${encodeURIComponent(inviteToken.trim())}`;
+      return `${base}?invite=${encodeURIComponent(inviteToken.trim())}`;
     }
-    return '/api/auth/google/start';
+    return base;
+  }
+
+  getProviderLinkUrl(provider: AuthProviderId): string {
+    return `/api/auth/${encodeURIComponent(provider)}/link`;
   }
 
   async getSession(): Promise<AccountSummary> {

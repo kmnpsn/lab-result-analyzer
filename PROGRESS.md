@@ -43,3 +43,6 @@
 11. **本番モードの未開通 SNS ダミー連携禁止 & ロックアウト防止ガード**
     - `AccountSummary.enabled_auth_providers` を追加し、本番モードでは実 OAuth 開通済みプロバイダ（現時点は `google` のみ）以外のダミー連携をサーバー側（`409 STATE_CONFLICT`）および設定 UI（「準備中（未接続）」）でブロック。
     - `DELETE /api/auth/identities/:provider` で、解除後に実際にログイン可能な手段が 0 件になる操作を拒否し、Google 連携解除によるロックアウトを構造的に防止。単体テスト全 6 スイート・24 件 PASS。
+12. **LINE Login（OIDC + PKCE）& Login with Amazon（OAuth 2.0）実ログイン・後追い連携の実装**
+    - `worker/auth.ts` に `/api/auth/line/{start,link,callback}`・`/api/auth/amazon/{start,link,callback}`・`/api/auth/google/link` を実装。Cloudflare Worker Secrets の登録有無に応じて `enabled_auth_providers` が自動有効化される設計とした。
+    - `scripts/setup-line-oauth.sh`（`npm run cf:line`）・`scripts/setup-amazon-oauth.sh`（`npm run cf:amazon`）および `docs/production-login.md` のコンソール設定手順を追加。単体テスト全 6 スイート・25 件 PASS。

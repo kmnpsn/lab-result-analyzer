@@ -192,3 +192,60 @@ openssl rand -base64 32 | npx wrangler secret put OAUTH_TRANSACTION_SECRET --nam
 ```
 
 - D1 のログイン用テーブル（`0003_auth_identities_and_invites.sql`）と Worker コードは **すでに本番へ適用・デプロイ済み** のため、上記を登録した瞬間から https://lab-result-analyzer.kmnpsn.workers.dev で本物の Google ログイン（招待制）がそのまま動きます。
+
+---
+
+## 6. LINE Login の開通手順（無料・個人開発可・所要約 5〜10 分）
+
+LINE Login を登録すると、コードの再デプロイなしで **ログイン画面の「LINE でログイン」** と **設定画面の「LINE を後追い連携」** が自動的に有効になります。
+
+### 手順 1: LINE Developers コンソールでチャネルを作る
+1. https://developers.line.biz/console/ を開き、ご自身の LINE アカウントでログインする。
+2. **プロバイダー** を作成する（例: `TakTech` または `からだ手帳`）。
+3. **「新規チャネル作成」＞「LINEログイン」** を選ぶ。
+   - **チャネル名**: `からだ手帳`
+   - **チャネル説明**: `日々の体調日記と採血結果を記録・管理するアプリ`
+   - **アプリタイプ**: `ウェブアプリ` にチェック
+   - **メールアドレス**: ご自身のメールアドレス
+4. 作成後、**「LINEログイン設定」** タブを開き、**コールバック URL** に以下を登録する：
+   ```text
+   https://lab-result-analyzer.kmnpsn.workers.dev/api/auth/line/callback
+   ```
+5. （任意・招待登録でも使いたい場合）**「チャネル基本設定」** タブの下部にある **「メールアドレス取得権限」** を「申請」して有効化しておくと、LINE 経由の招待登録時にもメールアドレス照合ができます（Google で登録したあとに LINE を後追い連携するだけならメール権限なしでも動作します）。
+6. チャネル上部のステータスが「開発中」のままだと自分のアカウントしか使えないため、家族・招待ユーザーも使う場合は **「公開」** に切り替える。
+7. **「チャネル基本設定」** タブに表示される **チャネル ID** と **チャネルシークレット** を控える。
+
+### 手順 2: ワンコマンドで Cloudflare Worker に登録する
+```bash
+cd ~/work/lab-result-analyzer
+npm run cf:line
+```
+
+---
+
+## 7. Amazon（Login with Amazon）の開通手順（無料・個人開発可・所要約 5〜10 分）
+
+※ 将来の課金（Amazon Pay）を見据えた **Amazon アカウントログイン／後追い連携** の開通手順です（Login with Amazon 自体は無料で個人でも即開通できます。将来の実決済・Amazon Pay 接続時は Phase D にて Seller Central の加盟店登録を別途行います）。
+
+### 手順 1: Amazon Developer Console でセキュリティプロファイルを作る
+1. https://developer.amazon.com/loginwithamazon/console/site/lwa/overview.html を開き、Amazon アカウントでサインインする（初回のみ開発者登録：無料）。
+2. **「新しいセキュリティプロファイルの作成」** を押す。
+   - **セキュリティプロファイル名**: `からだ手帳`
+   - **セキュリティプロファイルの説明**: `日々の体調日記と採血結果を記録するアプリ`
+   - **同意画面のプライバシー規約 URL**: `https://lab-result-analyzer.kmnpsn.workers.dev/`
+3. 作成後、一覧の歯車アイコンから **「ウェブ設定」** を開き、「編集」を押す。
+   - **許可された JavaScript オリジン**:
+     ```text
+     https://lab-result-analyzer.kmnpsn.workers.dev
+     ```
+   - **許可されたリターン URL**:
+     ```text
+     https://lab-result-analyzer.kmnpsn.workers.dev/api/auth/amazon/callback
+     ```
+4. 同じ「ウェブ設定」画面に表示される **クライアント ID** と **クライアントシークレット** を控える。
+
+### 手順 2: ワンコマンドで Cloudflare Worker に登録する
+```bash
+cd ~/work/lab-result-analyzer
+npm run cf:amazon
+```
